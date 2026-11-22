@@ -31,7 +31,13 @@ The seed is scoped to one disposable account per development database and uses f
 
 Keep the original local Supabase database. Stop the app with Control+C, then run `supabase migration up --local` from the updated project directory while Docker and Supabase are running. Retain your existing `.env.local` and restart the app with `npm run dev`. If you downloaded a fresh ZIP, copy your existing `.env.local` into the new folder first. See [the planner audit](PLANNER-UPGRADE.md) for data and migration details.
 
-Planner opens to a weekly calendar with a time-grid option. Choose Video production when creating a project to populate stages and tasks. Set a target publication date to assign due dates from the template. From a task, use its calendar button to schedule one or more work blocks. Drag sibling tasks by the grip or use the move buttons. Use Projects to edit all template types and Quick Quests to edit timer and milestone presets. Presets affect future applications. Scheduled blocks and logged sessions are tracked separately.
+**Topic Bank** stores ideas and converts them into projects with a preview of the template and schedule. **Projects** opens the portfolio and each video's Kanban, checklist, and timeline. Project templates include long-form, conversational, short-form, and repurposed clips. Edit their default durations and task XP in Projects. Existing projects keep their own schedule.
+
+**Timeline** shows all active projects and their phases. Open a project's timeline for its individual task dates. Drag the center of a bar to move it, or drag an end to resize it. The Dates button offers the same controls with a keyboard. Select a day, week, or month scale and use Undo to reverse a scheduling change in the current tab.
+
+**Calendar** stores clock-time work blocks. Drag in Week to move to another day, or use Time grid to change the start time and resize the block. Edit a block to change times by keyboard or duplicate it. Several blocks can point to one task. Rescheduling a phase or task leaves those blocks in place.
+
+**Quick Quests** can start a timer or prefill a manual work log. Choose a project and task if they apply. **Progression** shows Creator XP, six skills, milestones, and achievements. See [the project-centric audit and migration notes](PROJECT-CENTRIC-UPGRADE.md).
 
 ## XP rules
 
@@ -49,7 +55,7 @@ Planner opens to a weekly calendar with a time-grid option. Choose Video product
 - `app/` and `components/` provide the Next.js dashboard, Radix-based shadcn-style dialogs, project and task editors, session timer and preview, authentication, and preferences.
 - `lib/progression.ts` maps effective XP to levels and progress. Its factors come from the database profile. Database defaults also expose the time-based XP rate and daily cap. An administrator can update these rules in PostgreSQL and call the internal reconciliation function in the same transaction if existing awards should use new session rules.
 - `supabase/migrations/` owns persistence and authorization. RLS limits reads to each owner. Authenticated clients can mutate data through the authenticated RPCs. Their owner profile row serializes writes per user, including reconciliation. The effective-award ledger has one key per session or completion event and drives both progression tracks. It contains positive awards, and corrections replace or remove effective awards in the same transaction.
-- Projects use the existing stage and task tables. A separate work-block table supports multiple calendar entries per task. Skills shows XP-based milestone branches, and Insights shows daily work minutes and XP. Achievements, historical level-up events, and PWA support remain outside this upgrade.
+- Projects use the existing stage and task tables. A separate work-block table supports multiple calendar entries per task. Skills shows XP-based milestone branches, and Insights shows daily work minutes and XP. Progression shows achievements based on workspace totals. Historical level-up events and PWA support remain outside this upgrade.
 
 ## Verify
 
@@ -62,7 +68,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Vitest applies the production SQL migration to PostgreSQL through PGlite. The tests check leveling, cross-skill caps, time zones, correction and replay behavior, and tenant isolation. Playwright runs the responsive planner check by default. To run the authenticated project-to-XP workflow, point `.env.local` at a disposable Supabase development stack with email confirmation disabled and run `E2E_SUPABASE=1 npm run test:e2e`. Set `PLAYWRIGHT_CHROMIUM_PATH` to use an installed Chromium, or `PLAYWRIGHT_BASE_URL` to use a running app.
+Vitest applies the production SQL migration to PostgreSQL through PGlite. The tests check leveling, cross-skill caps, time zones, correction and replay behavior, and tenant isolation. Playwright runs the responsive portfolio check by default. To run the authenticated project-to-XP workflow, point `.env.local` at a disposable Supabase development stack with email confirmation disabled and run `E2E_SUPABASE=1 npm run test:e2e`. Set `PLAYWRIGHT_CHROMIUM_PATH` to use an installed Chromium, or `PLAYWRIGHT_BASE_URL` to use a running app.
 
 ## Deploy
 

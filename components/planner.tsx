@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useRef, useState, type DragEvent, type PointerEvent } from 'react'
 import { Temporal } from '@js-temporal/polyfill'
-import { CalendarDays, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
+import { ArrowDown, ArrowUp, CalendarDays, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { StudioDialog } from '@/components/ui/dialog'
 import { localInput, skills, type Block, type Snapshot, type TaskPreset, type Template } from '@/lib/studio'
 
@@ -17,17 +17,68 @@ function dateLabel(day: Temporal.PlainDate, options: Intl.DateTimeFormatOptions)
   return day.toLocaleString('en', options)
 }
 
-export function Planner({ snapshot, todayOnly, edit, add, openProject }: {
-  snapshot: Snapshot; todayOnly?: boolean; edit: (block: Block) => void; add: (day: string) => void; openProject: (id: string) => void
+export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, reschedule }: {
+  snapshot: Snapshot; todayOnly?: boolean; edit: (block: Block) => void; add: (day: string) => void; openProject: (id: string) => void; busy: boolean; reschedule: (block: Block,start: string,end: string) => void
 }) {
   const [offset, setOffset] = useState(0)
   const [timeline, setTimeline] = useState(false)
+  const resize = useRef<{ y: number; edge: 'start'|'end' }>(null)
+  const [resizeGuide,setResizeGuide]=useState<{ id:string; edge:'start'|'end'; minutes:number }>()
+  const [moveError,setMoveError]=useState('')
   const zone = snapshot.profile.timezone
   const today = currentDay(zone)
   const monday = today.subtract({ days: today.dayOfWeek - 1 }).add({ weeks: offset })
   const days = todayOnly ? [today] : Array.from({ length: 7 }, (_, i) => monday.add({ days: i }))
   const time = new Intl.DateTimeFormat('en', { timeZone: zone, hour: 'numeric', minute: '2-digit' })
   const active = snapshot.projects.filter(project => !project.archived)
+  function drop(event: DragEvent<HTMLElement>, day: string, from?: number, until?: number) {
+    event.preventDefault()
+    event.stopPropagation()
+    if(busy) return
+    const block=snapshot.blocks.find(item=>item.id===event.dataTransfer.getData('application/creator-block'))
+    if(!block) return
+    const duration=Date.parse(block.ends_at)-Date.parse(block.starts_at)
+    try {
+      let start: number
+      if(from!==undefined && until!==undefined){
+        const bounds=event.currentTarget.getBoundingClientRect()
+        const minutes=Math.round((event.clientY-bounds.top)/bounds.height*(until-from)/900000)*15
+        start=Math.max(from,Math.min(until-900000,from+minutes*60000))
+      }else{
+        const clock=localInput(block.starts_at,zone).slice(11)
+        start=Date.parse(localInstant(`${day}T${clock}`,zone))
+      }
+      if(start!==Date.parse(block.starts_at)) reschedule(block,new Date(start).toISOString(),new Date(start+duration).toISOString())
+      setMoveError('')
+    }catch{setMoveError('Choose a different time outside the daylight-saving transition.')}
+  }
+
+  function startResize(event:PointerEvent<HTMLElement>,edge:'start'|'end'){
+    if(busy || event.button!==0)return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    resize.current={y:event.clientY,edge}
+  }
+  function resizeMinutes(event:PointerEvent<HTMLElement>,row:HTMLElement,minutes:number){
+    const height=row.getBoundingClientRect().height
+    return Math.round((event.clientY-(resize.current?.y??event.clientY))/height*minutes/15)*15
+  }
+  function finishResize(event:PointerEvent<HTMLElement>,block:Block,minutes:number){
+    const operation=resize.current
+    const row=event.currentTarget.closest<HTMLElement>('.calendar-hours')
+    if(!operation || !row)return
+    const delta=resizeMinutes(event,row,minutes)*60000
+    resize.current=null
+    setResizeGuide(undefined)
+    if(!delta)return
+    const start=Date.parse(block.starts_at)
+    const end=Date.parse(block.ends_at)
+    const minimum=Math.min(end-start,900000)
+    const nextStart=operation.edge==='start'?Math.min(start+delta,end-minimum):start
+    const nextEnd=operation.edge==='end'?Math.max(end+delta,start+minimum):end
+    reschedule(block,new Date(nextStart).toISOString(),new Date(nextEnd).toISOString())
+  }
+
   return <section className="panel planner-panel" aria-label={todayOnly ? 'Today’s schedule' : 'Weekly production calendar'}>
     <div className="panel-heading planner-heading">
       <div><h2><CalendarDays size={20} />{todayOnly ? 'Today’s schedule' : dateLabel(monday, { month: 'long', year: 'numeric' })}</h2>
@@ -42,6 +93,7 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject }: {
       <button className="button secondary compact" aria-pressed={!timeline} onClick={() => setTimeline(false)}>Week</button>
       <button className="button secondary compact" aria-pressed={timeline} onClick={() => setTimeline(true)}>Time grid</button>
     </div>}
+    {moveError&&<p role="alert" className="form-error">{moveError}</p>}
     <div className={todayOnly ? 'calendar-today' : 'calendar-week'}>
       {days.map(day => {
         const key = day.toString()
@@ -65,12 +117,15 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject }: {
           const task = snapshot.tasks.find(item => item.id === block.task_id)
           const project = snapshot.projects.find(item => item.id === block.project_id)
           const color = skills.find(skill => skill.id === task?.skill_id)?.color ?? '#7184C4'
-          return <button key={block.id} className={`calendar-event event-${block.status}`} style={{ borderInlineStartColor: color }} onClick={() => edit(block)}>
+          return <button key={block.id} className={`calendar-event event-${block.status}`} style={{ borderInlineStartColor: color }}
+            draggable={!busy} onDragStart={event=>{event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('application/creator-block',block.id)}} onClick={() => edit(block)}>
             <small>{time.format(Math.max(from, Date.parse(block.starts_at)))}–{time.format(Math.min(until, Date.parse(block.ends_at)))}{block.status !== 'planned' && ` · ${block.status}`}</small>
-            <strong>{task?.title ?? project?.name ?? 'Work block'}</strong>{task && <small>{project?.name}</small>}
+            <strong>{task?.title ?? project?.name ?? 'Work block'}</strong>{task && <small>{project?.name}{task.status==='done'?' · Task done':''}</small>}
           </button>
         }
-        return <article className={`calendar-day ${key === today.toString() ? 'calendar-current' : ''}`} key={key}>
+        return <article className={`calendar-day ${key === today.toString() ? 'calendar-current' : ''}`} key={key}
+          onDragOver={event=>{if(!busy && event.dataTransfer.types.includes('application/creator-block'))event.preventDefault()}}
+          onDrop={event=>drop(event,key)}>
           <header><div><small>{dateLabel(day, { weekday: 'short' })}</small><strong>{day.day}</strong></div>
             <button className="icon-button" aria-label={`Schedule work on ${key}`} onClick={() => add(key)}><Plus size={16} /></button>
           </header>
@@ -78,15 +133,26 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject }: {
             <small>{project.actual_publication_date ? 'Published' : 'Publish target'}</small><strong>{project.name}</strong></button>)}
           {due.map(task => <button key={task.id} className="calendar-event calendar-marker" onClick={() => openProject(task.project_id)}>
             <small>Task due</small><strong>{task.title}</strong></button>)}
-          {timeline && !todayOnly ? <div className="calendar-hours" style={{ minHeight: `${rowHeight}rem` }}>
+          {timeline && !todayOnly ? <div className="calendar-hours" style={{ minHeight: `${rowHeight}rem` }} onDrop={event=>drop(event,key,from,until)}>
             {Array.from({ length: Math.ceil(dayMinutes / 180) }, (_, index) => <div className="calendar-hour" key={index}
               style={{ top: `${index * 18000 / dayMinutes}%` }}><small>{time.format(from + index * 10800000)}</small></div>)}
             {timedBlocks.map(({ block, start, end, lane }) => {
               const width = 100 / laneEnds.length
+              const shifting=resizeGuide?.id===block.id?resizeGuide:undefined
+              const visualStart=shifting?.edge==='start'?Math.min(start+shifting.minutes,end-15):start
+              const visualEnd=shifting?.edge==='end'?Math.max(end+shifting.minutes,start+15):end
               return <div className="calendar-timed" key={block.id} style={{
-                top: `${100 * start / dayMinutes}%`, height: `${100 * (end - start) / dayMinutes}%`,
+                top: `${100 * visualStart / dayMinutes}%`, height: `${100 * (visualEnd - visualStart) / dayMinutes}%`,
                 insetInlineStart: `${lane * width}%`, width: `${width}%`,
-              }}>{renderBlock(block)}</div>
+              }}>{renderBlock(block)}
+                {(['start','end'] as const).map(edge=><span key={edge} aria-hidden="true" className={`calendar-resize ${edge}`}
+                  onPointerDown={event=>startResize(event,edge)} onPointerMove={event=>{
+                    if(!resize.current)return
+                    const row=event.currentTarget.closest<HTMLElement>('.calendar-hours')
+                    if(row)setResizeGuide({id:block.id,edge,minutes:resizeMinutes(event,row,dayMinutes)})
+                  }} onPointerUp={event=>finishResize(event,block,dayMinutes)}
+                  onPointerCancel={()=>{resize.current=null;setResizeGuide(undefined)}}/>)}
+              </div>
             })}
           </div> : blocks.map(renderBlock)}
           {!timeline && !blocks.length && !publishing.length && !due.length && <small className="calendar-empty">No work scheduled</small>}
@@ -96,10 +162,10 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject }: {
   </section>
 }
 
-export function BlockEditor({ snapshot, block, day, projectId, taskId, busy, error, close, save }: EditorProps & {
-  snapshot: Snapshot; block?: Block; day?: string; projectId?: string; taskId?: string
+export function BlockEditor({ snapshot, block, duplicate, copy, day, projectId, taskId, busy, error, close, save }: EditorProps & {
+  snapshot: Snapshot; block?: Block; duplicate?: boolean; copy: (block: Block) => void; day?: string; projectId?: string; taskId?: string
 }) {
-  const [id] = useState(() => block?.id ?? crypto.randomUUID())
+  const [id] = useState(() => !duplicate && block ? block.id : crypto.randomUUID())
   const available = snapshot.projects.filter(project => !project.archived || project.id === block?.project_id)
   const [project, setProject] = useState(block?.project_id ?? projectId ?? available[0]?.id ?? '')
   const [task, setTask] = useState(block?.task_id ?? taskId ?? '')
@@ -110,7 +176,7 @@ export function BlockEditor({ snapshot, block, day, projectId, taskId, busy, err
   const estimate = snapshot.tasks.find(item => item.id === taskId)?.estimated_minutes ?? 30
   const initialEnd = block ? localInput(block.ends_at, zone)
     : Temporal.PlainDateTime.from(initialStart).add({ minutes: estimate }).toString({ smallestUnit: 'minute' })
-  return <StudioDialog title={block ? 'Edit work block' : 'Schedule work'} description={`Times use ${zone}. Planned work is separate from logged sessions.`} close={() => { if (!busy) close() }}>
+  return <StudioDialog title={duplicate ? 'Duplicate work block' : block ? 'Edit work block' : 'Schedule work'} description={`Times use ${zone}. Planned work is separate from logged sessions.`} close={() => { if (!busy) close() }}>
     {available.length ? <form className="form" onSubmit={event => {
       event.preventDefault()
       const data = new FormData(event.currentTarget)
@@ -132,10 +198,12 @@ export function BlockEditor({ snapshot, block, day, projectId, taskId, busy, err
         <label>Start<input type="datetime-local" name="start" required defaultValue={initialStart} /></label>
         <label>End<input type="datetime-local" name="end" required defaultValue={initialEnd} /></label>
       </div>
-      <label>Status<select name="status" defaultValue={block?.status ?? 'planned'}><option value="planned">Planned</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select></label>
+      <label>Status<select name="status" defaultValue={duplicate ? 'planned' : block?.status ?? 'planned'}><option value="planned">Planned</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select></label>
       <label>Notes<textarea name="notes" defaultValue={block?.notes} rows={3} /></label>
       {(failure || error) && <p role="alert" className="form-error">{failure || error}</p>}
-      <div className="form-actions"><button className="button primary" disabled={busy}>Save work block</button></div>
+      <div className="form-actions">
+        {block && !duplicate && <button type="button" className="text-button push" disabled={busy} onClick={()=>copy(block)}>Duplicate work block</button>}
+        <button className="button primary" disabled={busy}>Save work block</button></div>
     </form> : <p>Create an active project before scheduling a work block.</p>}
   </StudioDialog>
 }
@@ -145,20 +213,26 @@ export function TemplateEditor({ template, kind, busy, error, close, save }: Edi
 }) {
   const [id] = useState(() => template?.id ?? crypto.randomUUID())
   const [stages, setStages] = useState(() => (kind === 'stage'
-    ? [{ name: '', tasks: template?.details.tasks ?? [] }]
-    : template?.details.stages ?? [{ name: 'Script', tasks: [{ title: 'Finish the script', skill: 'scriptwriting', minutes: 25 }] }]
+    ? [{ name: '', duration_days: 1, tasks: template?.details.tasks ?? [] }]
+    : template?.details.stages ?? [{ name: 'Script', duration_days: 2, tasks: [{ title: 'Finish the script', skill: 'scriptwriting', minutes: 25 }] }]
   ).map(stage => ({ ...stage, key: crypto.randomUUID(), tasks: stage.tasks.map(task => ({ ...task, key: crypto.randomUUID() })) })))
 
   function patchTask(stageKey: string, taskKey: string, patch: Partial<TaskPreset>) {
     setStages(items => items.map(stage => stage.key === stageKey
       ? { ...stage, tasks: stage.tasks.map(task => task.key === taskKey ? { ...task, ...patch } : task) } : stage))
   }
+  function reorder<T>(items: T[], index: number, offset: number) {
+    const next = [...items]
+    const [item] = next.splice(index, 1)
+    next.splice(index + offset, 0, item)
+    return next
+  }
   return <StudioDialog title={template ? 'Edit preset' : `New ${kind} preset`} description="Make reusable changes for future projects and work." close={() => { if (!busy) close() }}>
     <form className="form" onSubmit={event => {
       event.preventDefault()
       const data = new FormData(event.currentTarget)
-      const stageDetails = stages.map(stage => ({ name: stage.name, tasks: stage.tasks.map(task => ({
-        title: task.title, skill: task.skill, minutes: task.minutes, days_before_publish: task.days_before_publish,
+      const stageDetails = stages.map(stage => ({ name: stage.name, duration_days: stage.duration_days, tasks: stage.tasks.map(task => ({
+        title: task.title, skill: task.skill, minutes: task.minutes, days_before_publish: task.days_before_publish, bonus: task.bonus,
       })) }))
       const details = kind === 'quest' || kind === 'task' ? {
         skill: data.get('skill'), ...(data.get('minutes') ? { minutes: Number(data.get('minutes')) } : {}),
@@ -171,19 +245,39 @@ export function TemplateEditor({ template, kind, busy, error, close, save }: Edi
       {kind === 'quest' || kind === 'task' ? <>
         <label>Skill<select name="skill" defaultValue={template?.details.skill ?? 'editing'}>{skills.map(skill => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select></label>
         <label>{kind === 'quest' ? 'Timer minutes (leave blank for a completion milestone)' : 'Estimated minutes'}<input name="minutes" type="number" min={1} max={1440} defaultValue={template?.details.minutes ?? (template ? '' : 25)} /></label>
-        {kind === 'quest' && <label>Milestone completion XP<input name="bonus" type="number" min={0} max={10000} defaultValue={template?.details.bonus ?? 10} /></label>}
+        {(kind === 'quest' || kind === 'task') && <label>{kind === 'quest' ? 'Milestone completion XP' : 'Completion XP'}<input name="bonus" type="number" min={0} max={10000} defaultValue={template?.details.bonus ?? (kind === 'quest' ? 10 : '')} /></label>}
       </> : <>
         {kind === 'project' && <label>Content type<input name="type" required maxLength={80} defaultValue={template?.details.content_type ?? 'Video'} /></label>}
-        {stages.map(stage => <fieldset key={stage.key} className="form preset-stage">
+        {stages.map((stage, stageIndex) => <fieldset key={stage.key} className="form preset-stage">
           {kind === 'project' && <label>Stage name<input required maxLength={120} value={stage.name} onChange={event => {
             setStages(items => items.map(item => item.key === stage.key ? { ...item, name: event.target.value } : item))
           }} /></label>}
-          {stage.tasks.map(task => <div key={task.key} className="form preset-task">
+          {kind === 'project' && <div className="form-grid">
+            <label>Default stage duration (days)<input required type="number" min={1} max={365} value={stage.duration_days ?? 1} onChange={event => {
+              const value = Number(event.target.value)
+              setStages(items => items.map(item => item.key === stage.key ? { ...item, duration_days: value } : item))
+            }} /></label>
+            <div className="actions">
+              <button type="button" className="icon-button" disabled={stageIndex===0} aria-label="Move stage up" onClick={() => setStages(items => reorder(items,stageIndex,-1))}><ArrowUp size={16} /></button>
+              <button type="button" className="icon-button" disabled={stageIndex===stages.length-1} aria-label="Move stage down" onClick={() => setStages(items => reorder(items,stageIndex,1))}><ArrowDown size={16} /></button>
+            </div>
+          </div>}
+          {stage.tasks.map((task,taskIndex) => <div key={task.key} className="form preset-task">
             <label>Task title<input required maxLength={160} value={task.title} onChange={event => patchTask(stage.key, task.key, { title: event.target.value })} /></label>
             <div className="form-grid">
               <label>Skill<select value={task.skill} onChange={event => patchTask(stage.key, task.key, { skill: event.target.value })}>
                 {skills.map(skill => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select></label>
               <label>Estimated minutes<input type="number" min={1} max={1440} value={task.minutes ?? ''} onChange={event => patchTask(stage.key, task.key, { minutes: event.target.value ? Number(event.target.value) : undefined })} /></label>
+            </div>
+            <label>Completion XP<input type="number" min={0} max={10000} value={task.bonus ?? ''} onChange={event => patchTask(stage.key, task.key, {
+              bonus: event.target.value ? Number(event.target.value) : undefined,
+            })} /></label>
+            <div className="actions">
+              {([-1,1] as const).map(direction => <button key={direction} type="button" className="icon-button"
+                aria-label={`Move task ${direction===-1?'up':'down'}`} disabled={taskIndex+direction<0 || taskIndex+direction>=stage.tasks.length}
+                onClick={() => setStages(items => items.map(item => item.key===stage.key ? { ...item,tasks:reorder(item.tasks,taskIndex,direction) } : item))}>
+                {direction===-1?<ArrowUp size={15}/>:<ArrowDown size={15}/>}
+              </button>)}
             </div>
             {kind === 'project' && <label>Days before target publication<input type="number" min={0} max={365}
               value={task.days_before_publish ?? ''} onChange={event => patchTask(stage.key, task.key, {
@@ -204,7 +298,7 @@ export function TemplateEditor({ template, kind, busy, error, close, save }: Edi
           </div>
         </fieldset>)}
         {kind === 'project' && <button className="button secondary compact" type="button" onClick={() => {
-          const stage = { key: crypto.randomUUID(), name: '', tasks: [] }
+          const stage = { key: crypto.randomUUID(), name: '', duration_days: 1, tasks: [] }
           setStages(items => [...items, stage])
         }}>Add stage</button>}
       </>}

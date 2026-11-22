@@ -153,3 +153,53 @@ it('upgrades existing awards, instantiates a pipeline, and keeps planned blocks 
   expect((await db.query('select id from public.work_blocks')).rows).toEqual([])
   expect((await db.query('select id from public.planner_templates')).rows).toEqual([])
 })
+
+it('converts an idea into an owned schedule and synchronizes board completion with one effective award', async () => {
+  await log(a, '2026-11-20T22:00:00Z', 42)
+  const original = await ledger()
+  await db.exec('reset role')
+  const plannerExists = await db.query<{ present:boolean }>("select to_regclass('public.work_blocks') is not null as present")
+  if (!plannerExists.rows[0].present) {
+    await db.exec(readFileSync(new URL('../supabase/migrations/20261122000100_planner.sql', import.meta.url), 'utf8'))
+  }
+  await db.exec(readFileSync(new URL('../supabase/migrations/20261122000200_project_centric.sql', import.meta.url), 'utf8'))
+  await login(owner)
+  expect(await ledger()).toEqual(original)
+  await db.query('select public.studio_production_snapshot()')
+  const template = (await db.query<{ id: string }>("select id from public.planner_templates where name='Long-form video'")).rows[0].id
+  await db.query('select public.studio_topic($1,$2)',[b,{title:'Video idea',description:'',notes:'',links:[],category:'',type:'Video',priority:2,status:'ready',archived:false}])
+  const meta={type:'Video',priority:2,status:'planned',notes:'',script:''}
+  const args=[c,'Video idea','',meta,template,'2026-11-21',true,false,b,[1,2,3,4,5],null]
+  await db.query('select public.studio_create_production($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',args)
+  await db.query('select public.studio_create_production($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',args)
+  const phases=(await db.query<{ name:string; id:string; planned_start:string; planned_end:string }>('select name,id,planned_start::text,planned_end::text from public.production_stages where project_id=$1 order by position',[c])).rows
+  expect(phases).toHaveLength(8)
+  expect(phases[0].planned_start).toBe('2026-11-23')
+  const found=(await db.query<{id:string}>("select id from public.tasks where project_id=$1 and title='Finish script'",[c])).rows[0].id
+  for(const state of ['done','blocked','done','done']) await db.query('select public.studio_board_task($1,$2,$3)',[c,found,state])
+  expect((await ledger()).filter(item=>item.skill_id==='scriptwriting')).toHaveLength(1)
+  expect((await ledger()).find(item=>item.skill_id==='scriptwriting')?.xp).toBe(100)
+  await db.query("select public.studio_quest_complete($1,id) from public.planner_templates where name='Finish the script'",[c])
+  expect((await db.query("select id from public.tasks where project_id=$1 and skill_id='scriptwriting' and status='done'",[c])).rows)
+    .toEqual([{id:found}])
+
+  const edit=phases.find(phase=>phase.name==='Editing')!
+  await db.query("select public.studio_schedule_span($1,'stage',$2,$3,$4,$5,$6)",[c,edit.id,'2026-12-01','2026-12-07',edit.planned_start,edit.planned_end])
+  expect((await db.query('select status from public.tasks where id=$1',[found])).rows[0]).toEqual({status:'done'})
+  const editedTemplate=(await db.query<{ name:string; details:unknown }>(
+    "select name,jsonb_set(details,'{stages,5,duration_days}','9') as details from public.planner_templates where id=$1",[template],
+  )).rows[0]
+  await db.query("select public.studio_template($1,'project',$2,$3)",[template,editedTemplate.name,editedTemplate.details])
+  const fresh = '00000000-0000-4000-8000-000000000099'
+  await db.query('select public.studio_create_production($1,$2,$3,$4,$5,$6,$7,$8)',[fresh,'New edition','',meta,template,'2026-12-01',true,false])
+  expect((await db.query("select planned_end-planned_start+1 as duration from public.production_stages where project_id=$1 and name='Editing'",[fresh])).rows).toEqual([{duration:9}])
+  expect((await db.query('select planned_start::text,planned_end::text from public.production_stages where id=$1',[edit.id])).rows)
+    .toEqual([{planned_start:'2026-12-01',planned_end:'2026-12-07'}])
+  await expect(db.query('select public.studio_create_production($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+    ['00000000-0000-4000-8000-000000000098','Duplicate','',meta,template,'2026-12-01',true,false,b])).rejects.toThrow('already has a project')
+
+  await db.exec('reset role')
+  await login(other)
+  expect((await db.query('select id from public.topics')).rows).toEqual([])
+  await expect(db.query('select public.studio_board_task($1,$2,$3)',[c,found,'todo'])).rejects.toThrow()
+})
