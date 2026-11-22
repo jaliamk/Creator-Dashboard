@@ -3,24 +3,30 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import type { User } from '@supabase/supabase-js'
 import {
-  Activity, ArrowDownToLine, Check, ChevronRight, CircleCheck, Clock3,
-  FolderOpen, LayoutGrid, ListTodo, LogIn, LogOut, Plus, Settings2, Sparkles, Timer,
+  Activity, ArrowDown, ArrowDownToLine, ArrowUp, CalendarDays, Check, ChevronRight, CircleCheck, Clock3,
+  FolderOpen, GripVertical, ListTodo, LogIn, LogOut, Plus, Settings2, Sparkles, Timer,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { StudioDialog } from '@/components/ui/dialog'
 import { progression } from '@/lib/progression'
-import { initial, rpc, skills, supabase, type Project, type Snapshot, type Task, type Theme, type WorkSession } from '@/lib/studio'
+import { initial, rpc, skills, supabase, type Block, type Project, type SessionDraft, type Snapshot, type Task, type Template, type Theme, type WorkSession } from '@/lib/studio'
+import { BlockEditor, Insights, Planner, TemplateEditor } from '@/components/planner'
 import { ProjectEditor, SessionEditor, TaskEditor } from '@/components/studio-forms'
 
 const navigation = [
-  { name: 'Overview', icon: LayoutGrid },
+  { name: 'Planner', icon: CalendarDays },
   { name: 'Projects', icon: FolderOpen },
-  { name: 'Work sessions', icon: Clock3 },
+  { name: 'Today', icon: ListTodo },
+  { name: 'Quick Quests', icon: Timer },
+  { name: 'Skills', icon: Sparkles },
+  { name: 'Insights', icon: Activity },
   { name: 'Settings', icon: Settings2 },
 ] as const
 type View = typeof navigation[number]['name']
 type Modal =
   | { kind: 'auth' }
+  | { kind: 'block'; block?: Block; day?: string; projectId?: string; taskId?: string }
+  | { kind: 'template'; category: Template['kind']; template?: Template }
   | { kind: 'project'; project?: Project }
   | { kind: 'task'; project: Project; task?: Task }
   | { kind: 'session'; session?: WorkSession }
@@ -43,7 +49,7 @@ function Empty({ icon: Icon, title, children }: { icon: typeof Clock3; title: st
 export function Studio() {
   const [user, setUser] = useState<User | null>(null)
   const [snapshot, setSnapshot] = useState<Snapshot>(initial)
-  const [view, setView] = useState<View>('Overview')
+  const [view, setView] = useState<View>('Planner')
   const [projectId, setProjectId] = useState<string>()
   const [modal, setModal] = useState<Modal>()
   const [notice, setNotice] = useState('')
@@ -52,8 +58,10 @@ export function Studio() {
   const [busy, setBusy] = useState(false)
   const [loading, setLoading] = useState(Boolean(supabase))
   const [timerStart, setTimerStart] = useState<number>()
+  const [timerContext, setTimerContext] = useState<{ project?: string; skill?: string; goal?: number }>({})
+  const [questProject, setQuestProject] = useState('')
   const [elapsed, setElapsed] = useState(0)
-  const [timerDraft, setTimerDraft] = useState<{ started: string; minutes: number }>()
+  const [timerDraft, setTimerDraft] = useState<SessionDraft>()
   const [localTheme, setLocalTheme] = useState<Theme>('system')
   const currentOwner = useRef<string | null>(null)
   const loadSequence = useRef(0)
@@ -78,10 +86,12 @@ export function Studio() {
       setError('')
       setTimerStart(undefined)
       setTimerDraft(undefined)
+      setTimerContext({})
+      setQuestProject('')
       if (!nextUser) { setLoading(false); return }
       setLoading(true)
       reload = setTimeout(() => {
-        rpc<Snapshot>('studio_snapshot', { p_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }).then(data => {
+        rpc<Snapshot>('studio_planner_snapshot', { p_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }).then(data => {
           if (active && request === loadSequence.current) setSnapshot(data)
         }).catch((failure: Error) => {
           if (active && request === loadSequence.current) setError(failure.message)
@@ -127,7 +137,7 @@ export function Studio() {
       setModal(undefined)
       setNotice(message)
       after?.()
-      const data = await rpc<Snapshot>('studio_snapshot')
+      const data = await rpc<Snapshot>('studio_planner_snapshot')
       if (owner === currentOwner.current) setSnapshot(data)
     } catch (failure) {
       if (owner !== currentOwner.current) return
@@ -148,15 +158,17 @@ export function Studio() {
 
   function stopTimer() {
     if (timerStart === undefined) return
+    const end = Date.now()
     setTimerDraft({
+      ...timerContext, ended: new Date(end).toISOString(),
       started: new Date(timerStart).toISOString(),
-      minutes: Math.min(1440, Math.floor((Date.now() - timerStart) / 60000)),
+      minutes: Math.min(1440, Math.floor((end - timerStart) / 60000)),
     })
     setTimerStart(undefined)
     open({ kind: 'session' })
   }
 
-  const projects = snapshot.projects.filter(project => !project.archived)
+  const projects = snapshot.projects.filter(project => !project.archived).sort((a, b) => a.priority - b.priority)
   const selected = snapshot.projects.find(project => project.id === projectId)
   const projectById = new Map(snapshot.projects.map(project => [project.id, project]))
   const queue = snapshot.tasks.filter(task => task.status !== 'done' && !projectById.get(task.project_id)?.archived)
@@ -165,7 +177,7 @@ export function Studio() {
   const activity = [
     ...snapshot.sessions.map(session => ({
       id: session.id, date: session.started_at, title: `${session.minutes} min · ${skillName(session.skill_id)}`,
-      subtitle: projectById.get(session.project_id)?.name, kind: 'session',
+      subtitle: projectById.get(session.project_id ?? '')?.name, kind: 'session',
     })),
     ...snapshot.tasks.filter(task => task.status === 'done').map(task => ({
       id: task.completion_id!, date: task.completed_at!, title: task.title,
@@ -178,23 +190,60 @@ export function Studio() {
     setProjectId(project.id)
   }
 
-  function renderTask(task: Task) {
+  const selectedTasks = snapshot.tasks.filter(task => task.project_id === selected?.id)
+    .sort((a, b) => a.position - b.position || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+
+  function moveTask(source: Task, target: Task) {
+    if (source.id === target.id || source.parent_id !== target.parent_id) return
+    const ids = selectedTasks.filter(task => task.parent_id === source.parent_id).map(task => task.id)
+    const destination = ids.indexOf(target.id)
+    ids.splice(ids.indexOf(source.id), 1)
+    ids.splice(destination, 0, source.id)
+    void mutate(() => rpc('studio_order_tasks', { p_project: source.project_id, p_parent: source.parent_id, p_ids: ids }), 'Task order saved.')
+  }
+
+  function renderTask(task: Task, tree = false) {
     const project = projectById.get(task.project_id)
-    return <div className="list-row" key={task.id}>
+    const siblings = tree ? selectedTasks.filter(item => item.parent_id === task.parent_id) : []
+    const index = siblings.findIndex(item => item.id === task.id)
+    return <div className="list-row" key={task.id} onDragOver={tree ? event => event.preventDefault() : undefined}
+      onDrop={tree ? event => {
+        event.preventDefault()
+        event.stopPropagation()
+        const source = selectedTasks.find(item => item.id === event.dataTransfer.getData('text/plain'))
+        if (source) moveTask(source, task)
+      } : undefined}>
+      {tree && <span className="task-grip" draggable={!busy} title="Drag to reorder sibling tasks"
+        onDragStart={event => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', task.id) }}><GripVertical size={16} /></span>}
       <button className={`check-button ${task.status === 'done' ? 'checked' : ''}`} disabled={busy}
         aria-label={`${task.status === 'done' ? 'Reopen' : 'Complete'} ${task.title}`}
         onClick={() => updateTask(task, task.status === 'done' ? 'todo' : 'done')}><Check size={15} /></button>
-      <div className="row-copy"><strong>{task.title}</strong><small>{view === 'Projects' && selected ? status[task.status] : project?.name} · {skillName(task.skill_id)}</small></div>
+      <div className="row-copy"><strong>{task.title}</strong><small>{view === 'Projects' && selected ? status[task.status] : project?.name} · {skillName(task.skill_id)}
+        {task.stage_id && ` · ${snapshot.stages.find(stage => stage.id === task.stage_id)?.name ?? ''}`}
+        {task.due_date && ` · Due ${task.due_date}`}{task.estimated_minutes && ` · ${task.estimated_minutes} min`}</small></div>
       <Badge tone={task.priority === 1 ? 'danger' : 'neutral'}>{priority[task.priority]}</Badge>
+      {tree && project && !project.archived && <button className="icon-button" aria-label={`Schedule ${task.title}`}
+        onClick={() => open({ kind: 'block', projectId: project.id, taskId: task.id })}><CalendarDays size={16} /></button>}
+      {tree && <div className="task-move">
+        <button className="icon-button" disabled={busy || index === 0} aria-label={`Move ${task.title} up`} onClick={() => moveTask(task, siblings[index - 1])}><ArrowUp size={14} /></button>
+        <button className="icon-button" disabled={busy || index === siblings.length - 1} aria-label={`Move ${task.title} down`} onClick={() => moveTask(task, siblings[index + 1])}><ArrowDown size={14} /></button>
+      </div>}
       {project && <button className="icon-button" aria-label={`Edit ${task.title}`} onClick={() => open({ kind: 'task', project, task })}><ChevronRight size={18} /></button>}
     </div>
+  }
+
+  function renderTaskTree(parent: string | null): React.ReactNode {
+    return selectedTasks.filter(task => task.parent_id === parent).map(task => <div key={task.id}>
+      {renderTask(task, true)}
+      {selectedTasks.some(child => child.parent_id === task.id) && <div className="nested-tasks">{renderTaskTree(task.id)}</div>}
+    </div>)
   }
 
   function renderProject(project: Project) {
     const tasks = snapshot.tasks.filter(task => task.project_id === project.id)
     return <button key={project.id} className="project-row" onClick={() => showProject(project)}>
       <span className="project-icon"><FolderOpen size={20} /></span>
-      <span className="row-copy"><strong>{project.name}</strong><small>{project.archived ? 'Archived · ' : ''}{tasks.filter(task => task.status === 'done').length}/{tasks.length} tasks complete</small></span>
+      <span className="row-copy"><strong>{project.name}</strong><small>{project.archived ? 'Archived' : project.status} · {project.content_type} · {snapshot.stages.find(stage => stage.id === project.production_stage_id)?.name ?? 'Unstaged'} · {tasks.filter(task => task.status === 'done').length}/{tasks.length} tasks complete</small></span>
       <ChevronRight size={17} className="muted" />
     </button>
   }
@@ -205,13 +254,14 @@ export function Studio() {
     if (!user) { open({ kind: 'auth' }); return }
     if (timerStart !== undefined) { stopTimer(); return }
     setElapsed(0)
+    setTimerContext({})
     setTimerStart(Date.now())
     setNotice('Work timer started.')
-  }}><Timer size={17} />{timerStart === undefined ? 'Start timer' : `Stop · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`}</button>
+  }}><Timer size={17} />{timerStart === undefined ? 'Start timer' : `Stop · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}${timerContext.goal ? ` / ${timerContext.goal} min` : ''}`}</button>
 
   return <div className="studio-shell">
     <aside className="sidebar">
-      <button className="brand" onClick={() => { setView('Overview'); setProjectId(undefined) }}>
+      <button className="brand" onClick={() => { setView('Planner'); setProjectId(undefined) }}>
         <span className="brand-icon"><Sparkles size={21} /></span><span>Creator Studio<small>Personal workspace</small></span>
       </button>
       <nav aria-label="Workspace">
@@ -232,23 +282,31 @@ export function Studio() {
     </aside>
 
     <main className="workspace">
-      <div className="topline"><span>Workspace</span><ChevronRight size={14} /><strong>{view}</strong></div>
+      <div className="topline"><span>Workspace</span><ChevronRight size={14} /><strong>{view}</strong>
+        <button className="header-xp" onClick={() => { setView('Skills'); setProjectId(undefined) }}><Sparkles size={15} /> Lv. {creator.level} · {total.toLocaleString()} XP</button>
+      </div>
       <header className="page-header">
         <div>
           {view === 'Projects' && selected && <button className="text-button back" onClick={() => setProjectId(undefined)}>All projects</button>}
-          <h1>{view === 'Overview' ? 'Studio overview' : selected?.name ?? view}</h1>
-          <p>{view === 'Overview' ? 'Track your projects, build your skills, and see your progress.' :
-            view === 'Projects' ? selected?.description || 'Organize creative projects and production tasks.' :
-            view === 'Work sessions' ? 'Track the time you spend building your skills.' : 'Manage your workspace preferences and data.'}</p>
+          <h1>{selected?.name ?? view}</h1>
+          <p>{{
+            Planner: 'Plan production work and deadlines across the week.',
+            Projects: selected?.description || 'Manage content projects from idea to publication.',
+            Today: 'See what’s on the calendar and what to do next.',
+            'Quick Quests': 'Start a focused session or check off a production milestone.',
+            Skills: 'See how your creative work builds skill and experience.',
+            Insights: 'Review activity, XP trends, and logged sessions.',
+            Settings: 'Manage workspace preferences and data.',
+          }[view]}</p>
         </div>
         <div className="actions">
-          {view === 'Overview' && <>{logButton}{newButton}</>}
+          {view === 'Planner' && <>{newButton}<button className="button secondary" onClick={() => open({ kind: 'block' })}><Plus size={16} /> Schedule work</button></>}
           {view === 'Projects' && (selected ? <>
             <button className="button secondary" onClick={() => open({ kind: 'project', project: selected })}>Edit project</button>
             <button className="button primary" onClick={() => open({ kind: 'task', project: selected })}><Plus size={17} /> New task</button>
           </> : newButton)}
-          {(view === 'Work sessions' || (timerStart !== undefined && view !== 'Settings')) && timerButton}
-          {view === 'Work sessions' && logButton}
+          {(view === 'Today' || timerStart !== undefined) && timerButton}
+          {(view === 'Today' || view === 'Insights') && logButton}
         </div>
       </header>
       {loading && <div className="banner" role="status">Loading your workspace…</div>}
@@ -261,7 +319,10 @@ export function Studio() {
         <button className="text-button" onClick={() => open({ kind: 'auth' })}>{supabase ? 'Sign in' : 'Connection details'}</button>
       </div>}
 
-      {view === 'Overview' && <>
+      {(view === 'Planner' || view === 'Today') && <Planner snapshot={snapshot} todayOnly={view === 'Today'}
+        edit={block => open({ kind: 'block', block })} add={day => open({ kind: 'block', day })}
+        openProject={id => { const project = projectById.get(id); if (project) showProject(project) }} />}
+      {view === 'Skills' && <>
         <section className="hero" aria-labelledby="creator-level">
           <div className="hero-content">
             <div className="hero-label"><Sparkles size={17} /> Creator progression</div>
@@ -284,13 +345,27 @@ export function Studio() {
           })}</div>
         </section>
         <div className="dashboard-grid">
+          {skills.map(skill => {
+            const earned = snapshot.ledger.filter(award => award.skill_id === skill.id).reduce((sum, award) => sum + award.xp, 0)
+            const milestones = snapshot.milestones.filter(item => item.skill_id === skill.id)
+            return <section className="panel" key={skill.id}><div className="panel-heading"><h2>{skill.name} milestones</h2></div>
+              {milestones.map(item => <div className="list-row" key={`${item.branch}-${item.xp}`}>
+                <div className="row-copy"><small>{item.branch}</small><strong>{item.title}</strong><small>{item.xp} XP</small></div>
+                <Badge>{earned >= item.xp ? 'Reached' : `${item.xp - earned} XP to go`}</Badge>
+              </div>)}
+            </section>
+          })}
+        </div>
+      </>}
+      {view === 'Today' && <>
+        <div className="dashboard-grid">
           <section className="panel">
             <div className="panel-heading"><h2><FolderOpen size={20} /> Current projects</h2><button className="text-button" onClick={() => { setView('Projects'); setProjectId(undefined) }}>View all</button></div>
             {projects.length ? projects.slice(0, 4).map(renderProject) : <Empty icon={FolderOpen} title="No active projects">Create a project to plan your next piece.</Empty>}
           </section>
           <section className="panel">
             <div className="panel-heading"><h2><ListTodo size={20} /> Next up</h2><Badge>{queue.length}</Badge></div>
-            {queue.length ? queue.slice(0, 4).map(renderTask) : <Empty icon={ListTodo} title="Your queue is clear">Add tasks within a project to see them here.</Empty>}
+            {queue.length ? queue.map(task => renderTask(task)) : <Empty icon={ListTodo} title="Your queue is clear">Add tasks within a project to see them here.</Empty>}
           </section>
         </div>
         <section className="panel activity-panel">
@@ -303,12 +378,59 @@ export function Studio() {
         </section>
       </>}
 
-      {view === 'Projects' && (selected ? <section className="panel">
+      {view === 'Quick Quests' && <section className="panel">
+        <div className="panel-heading"><h2>Quest presets</h2><button className="button secondary compact" onClick={() => open({ kind: 'template', category: 'quest' })}>New preset</button></div>
+        <label className="quest-project">Project<select value={questProject} onChange={event => setQuestProject(event.target.value)}>
+          <option value="">No project</option>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+        </select></label>
+        <div className="quest-grid">{snapshot.templates.filter(item => item.kind === 'quest').map(template => {
+          const minutes = template.details.minutes
+          const skill = skills.find(item => item.id === template.details.skill)
+          const completed = snapshot.tasks.some(task => task.project_id === questProject && task.title.toLowerCase() === template.name.toLowerCase() && task.skill_id === skill?.id && task.status === 'done')
+          return <article className="quest-card" key={template.id} style={{ '--skill': skill?.color } as CSSProperties}>
+            <div><small>{skill?.name} · {minutes ? `${minutes} min focus` : 'Completion milestone'}</small><h3>{template.name}</h3></div>
+            <div className="actions"><button className="button primary compact" disabled={busy || (minutes ? timerStart !== undefined : completed || !questProject)} onClick={() => {
+              if (!minutes) {
+                void mutate(() => rpc('studio_quest_complete', { p_project: questProject, p_template: template.id }), 'Milestone completed.')
+                return
+              }
+              setElapsed(0)
+              setTimerContext({ project: questProject, skill: skill?.id, goal: minutes })
+              setTimerStart(Date.now())
+              setNotice(`${minutes}-minute focus timer started.`)
+            }}>{minutes ? 'Start timer' : completed ? 'Completed' : 'Complete milestone'}</button>
+            <button className="text-button" onClick={() => open({ kind: 'template', category: 'quest', template })}>Edit preset</button></div>
+          </article>
+        })}</div>
+      </section>}
+      {view === 'Projects' && (selected ? <>
+        <section className="panel project-details">
+          <div className="panel-heading"><h2>Production pipeline</h2><Badge>{selected.status}</Badge></div>
+          <div className="pipeline">{snapshot.stages.filter(stage => stage.project_id === selected.id).map(stage =>
+            <Badge key={stage.id} className={stage.id === selected.production_stage_id ? 'pipeline-current' : undefined}>{stage.name}</Badge>)}
+            {!snapshot.stages.some(stage => stage.project_id === selected.id) && <small>Add a stage from a production preset.</small>}</div>
+          {selected.target_publication_date && <p>Target publication · {selected.target_publication_date}</p>}
+          {selected.actual_publication_date && <p>Published · {selected.actual_publication_date}</p>}
+          {selected.notes && <details><summary>Notes</summary><p>{selected.notes}</p></details>}
+          {selected.script && <details><summary>Script</summary><p>{selected.script}</p></details>}
+          {!selected.archived && <form className="apply-template" onSubmit={event => {
+            event.preventDefault()
+            const data = new FormData(event.currentTarget)
+            void mutate(() => rpc('studio_apply_template', { p_project: selected.id, p_template: data.get('preset'), p_stage: data.get('stage') || null }), 'Production preset added.')
+          }}>
+            <label>Add a preset<select name="preset" required defaultValue="">
+              <option value="" disabled>Choose stage or task</option>{snapshot.templates.filter(item => item.kind === 'stage' || item.kind === 'task').map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select></label>
+            <label>Stage for task<select name="stage" defaultValue={selected.production_stage_id ?? ''}><option value="">No stage</option>
+              {snapshot.stages.filter(stage => stage.project_id === selected.id).map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></label>
+            <button className="button secondary" disabled={busy}>Add preset</button>
+          </form>}
+        </section><section className="panel activity-panel">
         <div className="panel-heading"><h2><ListTodo size={20} /> Production tasks</h2>{selected.archived && <Badge>Archived</Badge>}</div>
         {snapshot.tasks.some(task => task.project_id === selected.id)
-          ? snapshot.tasks.filter(task => task.project_id === selected.id).map(renderTask)
+          ? renderTaskTree(null)
           : <Empty icon={ListTodo} title="No tasks yet">Add the first production task for this project.</Empty>}
-      </section> : <div className="dashboard-grid projects-grid">
+      </section></> : <div className="dashboard-grid projects-grid">
         <section className="panel"><div className="panel-heading"><h2>Active projects</h2><Badge>{projects.length}</Badge></div>
           {projects.length ? projects.map(renderProject) : <Empty icon={FolderOpen} title="No active projects">Create a project to start planning.</Empty>}
         </section>
@@ -317,15 +439,27 @@ export function Studio() {
         </section>
       </div>)}
 
-      {view === 'Work sessions' && <section className="panel">
+      {view === 'Insights' && <><Insights snapshot={snapshot} /><section className="panel activity-panel">
         <div className="panel-heading"><h2><Clock3 size={20} /> Session history</h2><Badge>{snapshot.sessions.length}</Badge></div>
         {snapshot.sessions.length ? snapshot.sessions.map(session => <div className="list-row" key={session.id}>
           <span className="project-icon"><Clock3 size={18} /></span>
           <div className="row-copy"><strong>{session.minutes} min · {skillName(session.skill_id)}</strong>
-            <small>{projectById.get(session.project_id)?.name} · {formatDate(session.started_at, session.timezone)}</small></div>
+            <small>{projectById.get(session.project_id ?? '')?.name} · {formatDate(session.started_at, session.timezone)}</small></div>
           <span className="xp-label">+{snapshot.ledger.find(award => award.source_type === 'session' && award.source_id === session.id)?.xp ?? 0} XP</span>
           <button className="button secondary compact" onClick={() => open({ kind: 'session', session })}>Edit</button>
         </div>) : <Empty icon={Clock3} title="No sessions logged">Start the timer or log time manually.</Empty>}
+      </section></>}
+
+      {(view === 'Projects' && !selected) && user && <section className="panel activity-panel">
+        <div className="panel-heading"><h2>Production templates</h2></div>
+        {(['project', 'stage', 'task'] as const).map(kind => <div className="template-group" key={kind}>
+          <div className="panel-heading"><h3>{kind[0].toUpperCase() + kind.slice(1)} templates</h3>
+            <button className="text-button" onClick={() => open({ kind: 'template', category: kind })}>New {kind} template</button></div>
+          {snapshot.templates.filter(item => item.kind === kind).map(template => <div className="list-row" key={template.id}>
+            <strong className="row-copy">{template.name}</strong>
+            <button className="button secondary compact" onClick={() => open({ kind: 'template', category: kind, template })}>Edit</button>
+          </div>)}
+        </div>)}
       </section>}
 
       {view === 'Settings' && <div className="dashboard-grid projects-grid">
@@ -357,7 +491,7 @@ export function Studio() {
               setError('')
               const owner = currentOwner.current
               try {
-                const data = await rpc<Snapshot>('studio_snapshot')
+                const data = await rpc<Snapshot>('studio_planner_snapshot')
                 if (owner !== currentOwner.current) return
                 const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
                 const link = document.createElement('a')
@@ -373,17 +507,21 @@ export function Studio() {
     </main>
 
     {modal?.kind === 'auth' && <AuthDialog close={() => setModal(undefined)} />}
-    {modal?.kind === 'project' && <ProjectEditor project={modal.project} busy={busy} error={modalError} close={() => setModal(undefined)}
-      remove={project => open({ kind: 'delete', project })} save={(args, id) => void mutate(() => rpc('studio_project', args), 'Project saved.', () => {
+    {modal?.kind === 'block' && <BlockEditor snapshot={snapshot} block={modal.block} day={modal.day} projectId={modal.projectId} taskId={modal.taskId} busy={busy} error={modalError}
+      close={() => setModal(undefined)} save={args => void mutate(() => rpc('studio_block', args), 'Work block saved.')} />}
+    {modal?.kind === 'template' && <TemplateEditor kind={modal.category} template={modal.template} busy={busy} error={modalError}
+      close={() => setModal(undefined)} save={args => void mutate(() => rpc('studio_template', args), args.p_delete ? 'Preset deleted.' : 'Preset saved.')} />}
+    {modal?.kind === 'project' && <ProjectEditor snapshot={snapshot} project={modal.project} busy={busy} error={modalError} close={() => setModal(undefined)}
+      remove={project => open({ kind: 'delete', project })} save={(args, id) => void mutate(() => rpc('studio_project_plan', args), 'Project saved.', () => {
         setView('Projects')
         setProjectId(id)
       })} />}
-    {modal?.kind === 'task' && <TaskEditor project={modal.project} task={modal.task} defaultBonus={snapshot.profile.default_task_xp}
+    {modal?.kind === 'task' && <TaskEditor snapshot={snapshot} project={modal.project} task={modal.task} defaultBonus={snapshot.profile.default_task_xp}
       busy={busy} error={modalError} close={() => setModal(undefined)}
-      save={args => void mutate(() => rpc('studio_task', args), args.p_status === 'done' ? 'Task saved. XP updated.' : 'Task saved.')} />}
+      save={args => void mutate(() => rpc('studio_task_plan', args), args.p_status === 'done' ? 'Task saved. XP updated.' : 'Task saved.')} />}
     {modal?.kind === 'session' && <SessionEditor snapshot={snapshot} session={modal.session} draft={modal.session ? undefined : timerDraft}
       busy={busy} error={modalError} close={() => setModal(undefined)} remove={session => open({ kind: 'delete', session })}
-      save={args => void mutate(() => rpc('studio_session', args), 'Work session saved. XP updated.', () => {
+      save={args => void mutate(() => rpc('studio_log_session', args), 'Work session saved. XP updated.', () => {
         if (!modal.session) setTimerDraft(undefined)
       })} />}
     {modal?.kind === 'delete' && <StudioDialog title={modal.project ? 'Delete project?' : 'Delete work session?'} description={

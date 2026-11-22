@@ -14,23 +14,38 @@ export const skills = [
   { id: 'production', name: 'Production', color: '#7184C4', icon: Layers3 },
 ] as const
 
-export type Project = { id: string; name: string; description: string; archived: boolean }
+export type Project = { id: string; name: string; description: string; archived: boolean
+  content_type: string; production_stage_id: string | null; priority: number; status: string
+  target_publication_date: string | null; actual_publication_date: string | null; notes: string; script: string
+  created_at: string; updated_at: string
+}
+export type Stage = { id: string; project_id: string; name: string; position: number }
+export type Block = { id: string; project_id: string; task_id: string | null; starts_at: string; ends_at: string; timezone: string; notes: string; status: 'planned' | 'completed' | 'cancelled' }
+export type TaskPreset = { title: string; skill: string; minutes?: number; days_before_publish?: number }
+export type Template = { id: string; name: string; kind: 'project' | 'stage' | 'task' | 'quest'; details: {
+  stages?: { name: string; tasks: TaskPreset[] }[]; tasks?: TaskPreset[];
+  skill?: string; minutes?: number; bonus?: number; content_type?: string
+} }
+export type Milestone = { skill_id: string; branch: string; title: string; xp: number }
+export type SessionDraft = { started: string; minutes: number; ended?: string; skill?: string; project?: string; task?: string }
 export type Task = {
   id: string; project_id: string; title: string; skill_id: string; status: 'todo' | 'doing' | 'done';
+  parent_id: string | null; stage_id: string | null; description: string; position: number;
+  estimated_minutes: number | null; due_date: string | null; created_at: string; updated_at: string;
   priority: number; bonus: number; completion_id: string | null; completed_at: string | null
 }
 export type WorkSession = {
-  id: string; project_id: string; task_id: string | null; skill_id: string; started_at: string;
-  minutes: number; timezone: string; local_day: string
+  id: string; project_id: string | null; task_id: string | null; skill_id: string; started_at: string;
+  minutes: number; timezone: string; local_day: string; ended_at: string | null; entry_method: 'timer' | 'manual'; notes: string; created_at: string; updated_at: string
 }
 export type Award = { source_type: 'session' | 'completion'; source_id: string; skill_id: string; xp: number; earned_at: string }
 export type Theme = 'system' | 'light' | 'dark'
 export type Profile = { timezone: string; theme: Theme; creator_factor: number; skill_factor: number; daily_cap: number; default_task_xp: number }
-export type Snapshot = { profile: Profile; projects: Project[]; stages: unknown[]; tasks: Task[]; sessions: WorkSession[]; ledger: Award[] }
+export type Snapshot = { profile: Profile; projects: Project[]; stages: Stage[]; blocks: Block[]; templates: Template[]; milestones: Milestone[]; tasks: Task[]; sessions: WorkSession[]; ledger: Award[] }
 
 export const initial: Snapshot = {
   profile: { timezone: 'UTC', theme: 'system', creator_factor: 50, skill_factor: 100, daily_cap: 100, default_task_xp: 10 },
-  projects: [], stages: [], tasks: [], sessions: [], ledger: [],
+  projects: [], stages: [], tasks: [], sessions: [], ledger: [], blocks: [], templates: [], milestones: [],
 }
 
 export async function rpc<T>(name: string, args?: Record<string, unknown>): Promise<T> {

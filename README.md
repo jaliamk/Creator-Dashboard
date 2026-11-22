@@ -27,6 +27,12 @@ psql 'postgresql://postgres:postgres@127.0.0.1:54322/postgres' \
 
 The seed is scoped to one disposable account per development database and uses fixed IDs, so rerunning it updates its sample rows. The migrations populate the six skill definitions for every installation.
 
+## Upgrade an existing local installation
+
+Keep the original local Supabase database. Stop the app with Control+C, then run `supabase migration up --local` from the updated project directory while Docker and Supabase are running. Retain your existing `.env.local` and restart the app with `npm run dev`. If you downloaded a fresh ZIP, copy your existing `.env.local` into the new folder first. See [the planner audit](PLANNER-UPGRADE.md) for data and migration details.
+
+Planner opens to a weekly calendar with a time-grid option. Choose Video production when creating a project to populate stages and tasks. Set a target publication date to assign due dates from the template. From a task, use its calendar button to schedule one or more work blocks. Drag sibling tasks by the grip or use the move buttons. Use Projects to edit all template types and Quick Quests to edit timer and milestone presets. Presets affect future applications. Scheduled blocks and logged sessions are tracked separately.
+
 ## XP rules
 
 - Creator XP and individual skill XP begin at Level 1. The total needed to reach a level is `factor × (level − 1) × level`, with default factors of 50 for Creator and 100 for skills.
@@ -43,7 +49,7 @@ The seed is scoped to one disposable account per development database and uses f
 - `app/` and `components/` provide the Next.js dashboard, Radix-based shadcn-style dialogs, project and task editors, session timer and preview, authentication, and preferences.
 - `lib/progression.ts` maps effective XP to levels and progress. Its factors come from the database profile. Database defaults also expose the time-based XP rate and daily cap. An administrator can update these rules in PostgreSQL and call the internal reconciliation function in the same transaction if existing awards should use new session rules.
 - `supabase/migrations/` owns persistence and authorization. RLS limits reads to each owner. Authenticated clients can mutate data through the authenticated RPCs. Their owner profile row serializes writes per user, including reconciliation. The effective-award ledger has one key per session or completion event and drives both progression tracks. It contains positive awards, and corrections replace or remove effective awards in the same transaction.
-- Production stages, parent-task links, ordering, and scheduling fields provide extension points for planning. Skills have stable identifiers for future branch and milestone definitions. Skill unlocks, achievements, historical level-up events, scheduling UI, analytics, and PWA support are outside Phase 1.
+- Projects use the existing stage and task tables. A separate work-block table supports multiple calendar entries per task. Skills shows XP-based milestone branches, and Insights shows daily work minutes and XP. Achievements, historical level-up events, and PWA support remain outside this upgrade.
 
 ## Verify
 
@@ -56,7 +62,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-Vitest applies the production SQL migration to PostgreSQL through PGlite. The tests check leveling, cross-skill caps, time zones, correction and replay behavior, and tenant isolation. Playwright runs the responsive overview check by default. To run the authenticated project-to-XP workflow, point `.env.local` at a disposable Supabase development stack with email confirmation disabled and run `E2E_SUPABASE=1 npm run test:e2e`. Set `PLAYWRIGHT_CHROMIUM_PATH` to use an installed Chromium, or `PLAYWRIGHT_BASE_URL` to use a running app.
+Vitest applies the production SQL migration to PostgreSQL through PGlite. The tests check leveling, cross-skill caps, time zones, correction and replay behavior, and tenant isolation. Playwright runs the responsive planner check by default. To run the authenticated project-to-XP workflow, point `.env.local` at a disposable Supabase development stack with email confirmation disabled and run `E2E_SUPABASE=1 npm run test:e2e`. Set `PLAYWRIGHT_CHROMIUM_PATH` to use an installed Chromium, or `PLAYWRIGHT_BASE_URL` to use a running app.
 
 ## Deploy
 
