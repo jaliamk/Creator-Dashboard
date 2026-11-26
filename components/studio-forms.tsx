@@ -4,7 +4,7 @@ import { useState, type FormEvent } from 'react'
 import { Temporal } from '@js-temporal/polyfill'
 import { currentDay } from '@/components/planner'
 import { StudioDialog } from '@/components/ui/dialog'
-import { localInput, rpc, skills, workflow, workflowKeys, type PlanPhase, type Project, type SessionDraft, type Snapshot, type Task, type Topic, type WorkSession } from '@/lib/studio'
+import { localInput, skills, workflow, workflowKeys, type Project, type SessionDraft, type Snapshot, type Task, type Topic, type WorkSession } from '@/lib/studio'
 
 type Args = Record<string, unknown>
 type Editor = { busy: boolean; error: string; close: () => void }
@@ -20,40 +20,23 @@ export function ProjectEditor({ snapshot, project, topic, busy, error, close, sa
   snapshot: Snapshot; project?: Project; topic?: Topic; save: (args: Args, id: string) => void; remove: (project: Project) => void
 }) {
   const [id] = useState(() => project?.id ?? crypto.randomUUID())
-  const templates = snapshot.templates.filter(item => item.kind === 'project')
-  const starter = templates.find(item => item.name === 'Studio workflow') ?? templates[0]
-  const [templateId, setTemplateId] = useState(starter?.id ?? '')
   const [contentType, setContentType] = useState(project?.content_type ??
-    (topic?.content_type && topic.content_type !== 'Video' ? topic.content_type : starter?.details.content_type ?? 'Long-form video'))
+    (topic?.content_type && topic.content_type !== 'Video' ? topic.content_type : 'Long-form video'))
   const [start, setStart] = useState(project?.start_date ?? currentDay(snapshot.profile.timezone).toString())
   const [auto, setAuto] = useState(true)
-  const [simple, setSimple] = useState(false)
   const [working, setWorking] = useState(false)
   const [days, setDays] = useState(snapshot.profile.working_days)
-  const [durations, setDurations] = useState<Record<number, number>>({})
-  const [preview, setPreview] = useState<PlanPhase[]>()
-  const [previewing, setPreviewing] = useState(false)
-  const [previewError, setPreviewError] = useState('')
-  const template = templates.find(item => item.id === templateId)
+  const [durations, setDurations] = useState([1,2,1,3,1])
   const plan = {
-    p_template: templateId || null, p_start: start, p_auto: auto, p_simple: simple,
-    p_days: working ? days : null,
-    p_durations: template?.details.stages?.map((stage, index) => durations[index] ?? stage.duration_days ?? 1) ?? null,
-  }
-  async function showPreview() {
-    setPreviewing(true)
-    setPreviewError('')
-    try { setPreview(await rpc<PlanPhase[]>('studio_generate_plan', plan)) }
-    catch (failure) { setPreviewError((failure as Error).message) }
-    finally { setPreviewing(false) }
+    p_template: null, p_start: start, p_auto: auto, p_simple: true,
+    p_days: working ? days : null, p_durations: durations,
   }
   return <StudioDialog title={project ? 'Edit project' : topic ? 'Add as Project' : 'New project'}
-    description={project ? 'Update the project details. Use the timeline to rearrange existing dates.' : 'Choose a template and preview the production plan.'}
+    description={project ? 'Update the project details. Use the timeline to rearrange existing dates.' : 'Start with five production stages.'}
     close={() => { if (!busy) close() }}>
     <form className="form" onSubmit={event => {
       event.preventDefault()
       const data = new FormData(event.currentTarget)
-      if (topic && !preview) { void showPreview(); return }
       const args = { p_id: id, p_name: data.get('name'), p_description: data.get('description'), p_start: start,
         p_meta: { type: data.get('type'), stage: project?.production_stage_id ?? null, workflow: data.get('workflow'), priority: Number(data.get('priority')),
           status: data.get('status'), target: data.get('target') || null, actual: data.get('actual') || null,
@@ -62,41 +45,22 @@ export function ProjectEditor({ snapshot, project, topic, busy, error, close, sa
     }}>
       <label>Project name<input name="name" autoFocus required maxLength={120} defaultValue={project?.name ?? topic?.title} /></label>
       <label>Description<textarea name="description" maxLength={4000} rows={2} defaultValue={project?.description ?? topic?.description} /></label>
-      <label>Project start date<input type="date" required value={start} onChange={event => { setStart(event.target.value); setPreview(undefined) }} /></label>
-      {!project && <>
-        <label>Project template<select name="template" required={Boolean(topic)} value={templateId} onChange={event => {
-          setTemplateId(event.target.value); setDurations({}); setPreview(undefined)
-          const selected = templates.find(item => item.id === event.target.value)
-          if (selected?.details.content_type) setContentType(selected.details.content_type)
-        }}><option value="">Blank project</option>{templates.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        {template && <>
-          <label>Workflow<select value={simple ? 'simple' : 'full'} onChange={event => { setSimple(event.target.value === 'simple'); setPreview(undefined) }}>
-            <option value="full">Full workflow</option><option value="simple">Simplified workflow</option>
+      <label>Project start date<input type="date" required value={start} onChange={event => setStart(event.target.value)} /></label>
+      {!project && <details className="project-edit-metadata"><summary>Schedule options</summary>
+        <label className="checkbox"><input type="checkbox" checked={auto} onChange={event => setAuto(event.target.checked)} /> Generate timeline automatically</label>
+        {auto && <>
+          <label>Schedule using<select value={working ? 'working' : 'calendar'} onChange={event => setWorking(event.target.value === 'working')}>
+            <option value="calendar">Calendar days</option><option value="working">Working days</option>
           </select></label>
-          <label className="checkbox"><input type="checkbox" checked={auto} onChange={event => { setAuto(event.target.checked); setPreview(undefined) }} /> Generate timeline automatically</label>
-          {auto && <>
-            <label>Schedule using<select value={working ? 'working' : 'calendar'} onChange={event => { setWorking(event.target.value === 'working'); setPreview(undefined) }}>
-              <option value="calendar">Calendar days</option><option value="working">Working days</option>
-            </select></label>
-            {working && <WorkingDays days={days} change={value => { setDays(value); setPreview(undefined) }} />}
-            <details><summary>Adjust durations for this project</summary><div className="form-grid">
-              {template.details.stages?.map((stage, index) => <label key={index}>{stage.name} days<input type="number" min={1} max={365}
-                value={durations[index] ?? stage.duration_days ?? 1} required onChange={event => {
-                  const value = Number(event.target.value)
-                  setDurations(previous => ({ ...previous, [index]: value })); setPreview(undefined)
-                }} /></label>)}</div></details>
-          </>}
-          <button type="button" className="button secondary" disabled={previewing || !start || busy}
-            onClick={() => void showPreview()}>{previewing ? 'Generating…' : 'Preview workflow'}</button>
-          {preview && <section className="plan-preview" aria-label="Generated workflow">
-            {preview.map((phase, index) => <details key={index} open={index === 0}>
-              <summary>{phase.name} · {phase.tasks.length} tasks{phase.start && ` · ${phase.start} – ${phase.end}`}</summary>
-              <ul>{phase.tasks.map((task, n) => <li key={n}>{task.title}{task.start && ` · ${task.start} – ${task.end}`}</li>)}</ul>
-            </details>)}
-          </section>}
-          {previewError && <p className="form-error" role="alert">{previewError}</p>}
+          {working && <WorkingDays days={days} change={setDays} />}
+          <div className="form-grid">{workflowKeys.filter(key => key !== 'published').map((key,index) =>
+            <label key={key}>{workflow[key].name} days<input type="number" min={1} max={365} required value={durations[index] || ''}
+              onChange={event => {
+                const value = Number(event.target.value)
+                setDurations(items => items.map((duration,i) => i === index ? value : duration))
+              }} /></label>)}</div>
         </>}
-      </>}
+      </details>}
       <details className="project-edit-metadata" open={Boolean(project) || undefined}><summary>Project details</summary>
       <div className="form-grid">
         <label>Content type<input name="type" list="project-content-types" required maxLength={80} value={contentType} onChange={event => setContentType(event.target.value)} /></label>
@@ -117,7 +81,7 @@ export function ProjectEditor({ snapshot, project, topic, busy, error, close, sa
       <div className="form-actions">
         {project && <button className="text-button danger-text push" type="button" disabled={busy} onClick={() => remove(project)}>Delete project</button>}
         <button type="button" className="button secondary" disabled={busy} onClick={close}>Cancel</button>
-        <button className="button primary" disabled={busy || previewing}>{busy ? 'Saving…' : project ? 'Save project' : topic && !preview ? 'Preview project' : 'Create project'}</button>
+        <button className="button primary" disabled={busy}>{busy ? 'Saving…' : project ? 'Save project' : 'Create project'}</button>
       </div>
     </form>
   </StudioDialog>
@@ -145,7 +109,7 @@ export function TaskEditor({ snapshot, project, task, initialStatus, busy, error
         p_meta: { description: data.get('description'), parent: data.get('parent') || null,
           stage: data.get('stage') || null, dependency: data.get('dependency') || null, due: data.get('due') || null, minutes: data.get('minutes') || null } })
     }}>
-      <label>Task title<input name="title" required maxLength={160} defaultValue={task?.title} autoFocus /></label>
+      <label>Task title<input name="title" required maxLength={160} defaultValue={task?.title} readOnly={Boolean(task?.production_key)} autoFocus /></label>
       <label>Description<textarea name="description" rows={2} defaultValue={task?.description} /></label>
       <div className="form-grid"><SkillField initial={task?.skill_id} />
         <label>Production stage<select name="stage" defaultValue={task?.stage_id ?? ''}><option value="">No stage</option>{snapshot.stages.filter(stage => stage.project_id === project.id).map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></label>
@@ -162,7 +126,7 @@ export function TaskEditor({ snapshot, project, task, initialStatus, busy, error
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="form-actions">
-        {task && <><button className="text-button danger-text push" type="button" disabled={busy} onClick={() => action(task, 'delete')}>Delete task</button>
+        {task && !task.production_key && <><button className="text-button danger-text push" type="button" disabled={busy} onClick={() => action(task, 'delete')}>Delete task</button>
           <button className="text-button" type="button" disabled={busy} onClick={() => action(task, 'duplicate')}>Duplicate task</button></>}
         <button type="button" className="button secondary" disabled={busy} onClick={close}>Cancel</button>
         <button className="button primary" disabled={busy}>{busy ? 'Saving…' : task ? 'Save task' : 'Create task'}</button>

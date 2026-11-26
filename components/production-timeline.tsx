@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent } from 'react'
 import { Temporal } from '@js-temporal/polyfill'
-import { Check, ChevronRight, RotateCcw } from 'lucide-react'
+import { Check, RotateCcw } from 'lucide-react'
 import { StudioDialog } from '@/components/ui/dialog'
 import { currentDay } from '@/components/planner'
-import { stageKey, workflow, type Project, type Snapshot, type Span, type Task } from '@/lib/studio'
+import { workflow, workflowKeys, type Project, type Snapshot, type Span, type Task } from '@/lib/studio'
 
 export type SpanItem = Span & { id: string; project_id: string; title: string; kind: 'stage' | 'task' }
-type Row = SpanItem & { progress: number; color?: string; task?: Task; depth: number; collapsible?: boolean }
+type Row = SpanItem & { progress: number; color?: string; task?: Task; depth: number }
 type Mode = 'move' | 'start' | 'end'
 type Drag = { row: Row; pointer: number; x: number; scrollLeft: number; delta: number; mode: Mode }
 const calendarDate = (value: string) => Temporal.PlainDate.from(value)
@@ -28,7 +28,6 @@ export function ProductionTimeline({ snapshot, project, busy, undo, edit, move, 
   openTask: (task: Task) => void; openProject: (project: Project) => void
 }) {
   const [scale,setScale] = useState<'day'|'week'|'month'>('day')
-  const [closed,setClosed] = useState<string[]>([])
   const [extra,setExtra] = useState(0)
   const [past,setPast] = useState(0)
   const [drag,setDrag] = useState<Drag>()
@@ -73,27 +72,20 @@ export function ProductionTimeline({ snapshot, project, busy, undo, edit, move, 
     }
   }, [])
   const today = currentDay(snapshot.profile.timezone).toString()
-  const projects = project ? [project] : snapshot.projects.filter(item => !item.archived)
+  const projects = (project ? [project] : snapshot.projects)
+    .filter(item => !item.archived && item.workflow_stage !== 'published')
   const projectIds = new Set(projects.map(item => item.id))
-  const assigned = snapshot.tasks.filter(task => projectIds.has(task.project_id))
-  const stages = snapshot.stages.filter(stage => projectIds.has(stage.project_id))
-  const rowsForProject = (video: Project): Row[] => {
-    const tasks = assigned.filter(task => task.project_id===video.id)
-    const taskRow = (task: Task): Row => ({
-      ...task, kind:'task', task, depth:task.stage_id ? 1 : 0, progress:Number(task.status==='done'),
-      color:workflow[stageKey(stages.find(item=>item.id===task.stage_id)?.name,task.skill_id)].color,
-    })
-    const phases = stages.filter(stage => stage.project_id===video.id).flatMap(stage => {
-      const children=tasks.filter(task=>task.stage_id===stage.id)
-      const row:Row = { ...stage, title:stage.name, kind:'stage', depth:0, collapsible:Boolean(project && children.length),
-        progress:children.length?children.filter(task=>task.status==='done').length/children.length:0, color:workflow[stageKey(stage.name)].color }
-      return [row,...(project && !closed.includes(stage.id) ? children.map(taskRow) : [])]
-    })
-    return [...phases,...(project ? tasks.filter(task=>!task.stage_id).map(taskRow) : [])]
-  }
-  const groupRows = projects.map(item=>({ item, rows: rowsForProject(item) }))
-  const dates = [today,...projects.flatMap(item=>[item.start_date,item.target_publication_date,item.actual_publication_date]),
-    ...[...stages,...assigned].flatMap(item=>[item.planned_start,item.planned_end])].filter((value):value is string=>Boolean(value)).sort()
+  const assigned = snapshot.tasks.filter(task => projectIds.has(task.project_id) && task.production_key)
+  const groupRows = projects.map(item => ({
+    item,
+    rows: assigned.filter(task => task.project_id === item.id).sort((a,b) =>
+      workflowKeys.indexOf(a.production_key!) - workflowKeys.indexOf(b.production_key!)).map((task): Row => ({
+      ...task, kind:'task', task, depth:0, progress:Number(task.status==='done'),
+      color:workflow[task.production_key!].color,
+    })),
+  }))
+  const dates = [today,...projects.flatMap(item=>[item.start_date,item.target_publication_date]),
+    ...assigned.flatMap(item=>[item.planned_start,item.planned_end])].filter((value):value is string=>Boolean(value)).sort()
   const from = shift(dates[0],-past)
   const latest = dates.at(-1)!
   const step = scale==='day'?1:scale==='week'?7:30
@@ -124,7 +116,9 @@ export function ProductionTimeline({ snapshot, project, busy, undo, edit, move, 
     '--gantt-grid-lines': monthGrid,
   } as CSSProperties
   const todayIndicator = <span className="gantt-now" aria-hidden="true" />
-  const label = (date: string) => calendarDate(date).toLocaleString('en',scale==='month'?{month:'short',year:'2-digit'}:{month:'short',day:'numeric'})
+  const monthTicks = [from, ...Array.from({length:calendarDate(from).until(calendarDate(shift(from,days)),{largestUnit:'months'}).months+1},
+    (_,index)=>calendarDate(from).with({day:1}).add({months:index+1}).toString()).filter(date=>distance(from,date)<days)]
+  const label = (date: string) => calendarDate(date).toLocaleString('en',{weekday:'short'})
 
   function begin(event: PointerEvent<HTMLElement>,row: Row,mode: Mode) {
     if (busy || event.button!==0) return
@@ -171,10 +165,15 @@ export function ProductionTimeline({ snapshot, project, busy, undo, edit, move, 
     <div className="gantt-scroll" ref={scroll} tabIndex={0} aria-label="Scrollable production timeline">
       <div className="gantt-content" ref={content}>
         <div className="gantt-line gantt-axis"><strong className="gantt-label">Production</strong>
-          <div className="gantt-track">{todayIndicator}{tick.map(date=><span className="gantt-tick" key={date}
-            aria-current={date === today ? 'date' : undefined} style={{left:distance(from,date)*px}}>
-            {label(date)}
-          </span>)}</div>
+          <div className="gantt-track">{todayIndicator}
+            {monthTicks.map(date => <span className="gantt-month" key={date} style={{left:distance(from,date)*px}}>
+              {calendarDate(date).toLocaleString('en',{month:'long',year:'numeric'})}
+            </span>)}
+            {scale!=='month' && tick.map(date => <span className="gantt-tick" key={date}
+              aria-current={date===today?'date':undefined} style={{left:distance(from,date)*px}}>
+              <small>{label(date)}</small><strong>{calendarDate(date).day}</strong>
+            </span>)}
+          </div>
         </div>
         {groupRows.map(({item,rows})=><div key={item.id}>
           {!project && <div className="gantt-line gantt-project"><button className="gantt-label text-button" onClick={()=>openProject(item)}>{item.name}</button>
@@ -187,10 +186,8 @@ export function ProductionTimeline({ snapshot, project, busy, undo, edit, move, 
             const active=drag?.row.id===row.id
             const span=row.planned_start && row.planned_end ? active ? moved(row,drag.delta,drag.mode) : [row.planned_start,row.planned_end] : null
             const dependency=row.task?.depends_on ? assigned.find(task=>task.id===row.task?.depends_on) : undefined
-            return <div className={`gantt-line ${row.kind==='stage'?'gantt-stage':''}`} key={row.id}>
+            return <div className={`gantt-line gantt-stage`} key={row.id}>
               <div className="gantt-label" style={{paddingInlineStart:row.depth ? '1.25rem' : undefined}}>
-                {row.collapsible && <button className="icon-button gantt-collapse" aria-label={`${closed.includes(row.id)?'Expand':'Collapse'} ${row.title}`}
-                  aria-expanded={!closed.includes(row.id)} onClick={()=>setClosed(items=>items.includes(row.id)?items.filter(id=>id!==row.id):[...items,row.id])}><ChevronRight size={14}/></button>}
                 {row.task && <button className={`gantt-check ${row.task.status==='done'?'checked':''}`}
                   aria-label={`${row.task.status==='done'?'Reopen':'Complete'} ${row.title}`} disabled={busy} onClick={()=>complete(row.task!)}><Check size={13}/></button>}
                 <div className="gantt-label-copy">
@@ -217,7 +214,7 @@ export function ProductionTimeline({ snapshot, project, busy, undo, edit, move, 
           })}
           {!rows.length && <p className="gantt-empty muted">No phases or tasks have been added.</p>}
         </div>)}
-        {!projects.length && <p className="gantt-empty muted">Create a project to start planning.</p>}
+        {!projects.length && <p className="gantt-empty muted">{project ? 'This project is outside active planning. Reopen or restore it to see its timeline.' : 'No active projects to plan.'}</p>}
       </div>
     </div>
     <input ref={scrollbar} className="gantt-scrollbar" type="range" aria-label="Scroll timeline horizontally" min={0}

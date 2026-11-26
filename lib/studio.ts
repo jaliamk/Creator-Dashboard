@@ -1,3 +1,4 @@
+import type { QuestKey } from '@/lib/quests'
 import { createClient } from '@supabase/supabase-js'
 import { Clapperboard, FileText, Video, Search, Mic2, Layers3 } from 'lucide-react'
 
@@ -23,6 +24,7 @@ export const workflow = {
   published: { name: 'Published', color: '#749B68' },
 } as const
 export type WorkflowStage = keyof typeof workflow
+export type ActionableStage = Exclude<WorkflowStage, 'published'>
 export const workflowKeys = Object.keys(workflow) as WorkflowStage[]
 
 export function stageKey(name: string | undefined, skill?: string): WorkflowStage {
@@ -41,10 +43,11 @@ export type CalendarDay = {
   project_id: string; task_id: string; day: string;
   starts_at: string | null; ends_at: string | null; timezone: string | null;
 }
+export type QuestCompletion = { id: string; quest_key: QuestKey; completed_at: string; completed_on: string }
 export type Publication = { source_project_id: string; title: string; format: 'long' | 'short'; published_on: string }
 
 export type Project = { id: string; name: string; description: string; archived: boolean
-  content_type: string; production_stage_id: string | null; priority: number; status: string; workflow_stage: WorkflowStage
+  content_type: string; production_stage_id: string | null; priority: number; status: string; workflow_stage: WorkflowStage; board_position: number
   target_publication_date: string | null; actual_publication_date: string | null; notes: string; script: string
   created_at: string; updated_at: string; start_date: string | null; cover_url: string
 }
@@ -64,7 +67,7 @@ export type PlanPhase = { name: string; duration: number; start: string | null; 
 export type SessionDraft = { started: string; minutes: number; ended?: string; skill?: string; project?: string; task?: string; method?: 'timer' | 'manual' }
 export type Task = Span & {
   id: string; project_id: string; title: string; skill_id: string; status: 'todo' | 'doing' | 'done';
-  depends_on: string | null; parent_id: string | null; stage_id: string | null; description: string; position: number;
+  production_key: ActionableStage | null; depends_on: string | null; parent_id: string | null; stage_id: string | null; description: string; position: number;
   estimated_minutes: number | null; due_date: string | null; created_at: string; updated_at: string;
   priority: number; bonus: number; completion_id: string | null; completed_at: string | null
 }
@@ -75,11 +78,11 @@ export type WorkSession = {
 export type Award = { source_type: 'session' | 'completion'; source_id: string; skill_id: string; xp: number; earned_at: string }
 export type Theme = 'system' | 'light' | 'dark'
 export type Profile = { timezone: string; theme: Theme; creator_factor: number; skill_factor: number; daily_cap: number; default_task_xp: number; working_days: number[] }
-export type Snapshot = { profile: Profile; projects: Project[]; stages: Stage[]; blocks: Block[]; templates: Template[]; milestones: Milestone[]; tasks: Task[]; sessions: WorkSession[]; ledger: Award[]; topics: Topic[]; achievements: Achievement[]; calendar_days: CalendarDay[]; publications: Publication[] }
+export type Snapshot = { profile: Profile; projects: Project[]; stages: Stage[]; blocks: Block[]; templates: Template[]; milestones: Milestone[]; tasks: Task[]; sessions: WorkSession[]; ledger: Award[]; topics: Topic[]; achievements: Achievement[]; calendar_days: CalendarDay[]; publications: Publication[]; quest_completions: QuestCompletion[] }
 
 export const initial: Snapshot = {
   profile: { timezone: 'UTC', theme: 'system', creator_factor: 50, skill_factor: 100, daily_cap: 100, default_task_xp: 10, working_days: [1, 2, 3, 4, 5] },
-  projects: [], stages: [], tasks: [], sessions: [], ledger: [], blocks: [], templates: [], milestones: [], topics: [], achievements: [], calendar_days: [], publications: [],
+  projects: [], stages: [], tasks: [], sessions: [], ledger: [], blocks: [], templates: [], milestones: [], topics: [], achievements: [], calendar_days: [], publications: [], quest_completions: [],
 }
 
 export async function rpc<T>(name: string, args?: Record<string, unknown>): Promise<T> {

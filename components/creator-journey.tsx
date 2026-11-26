@@ -1,6 +1,7 @@
 import { useState, type CSSProperties } from 'react'
 import { Temporal } from '@js-temporal/polyfill'
 import { Check, Clock3, Film, Video } from 'lucide-react'
+import { quests } from '@/lib/quests'
 import { currentDay } from '@/components/planner'
 import { stageKey, workflow, workflowKeys, type Snapshot } from '@/lib/studio'
 
@@ -17,11 +18,23 @@ const activities = {
 
 export function CreatorJourney({ snapshot }: { snapshot: Snapshot }) {
   const [period, setPeriod] = useState<'week' | 'month' | 'all'>('week')
-  const { publications, sessions } = snapshot
+  const { publications, sessions, quest_completions } = snapshot
   const total = publications.length
   const long = publications.filter(item => item.format === 'long').length
   const minutes = sessions.reduce((sum, session) => sum + session.minutes, 0)
-  const next = milestones.find(count => count > total)
+  const short = total - long
+  const sessionCount = sessions.length + quest_completions.filter(item => quests[item.quest_key].session).length
+  const history = [
+    ...publications.map(item => ({
+      id: item.source_project_id, title: item.title, date: item.published_on,
+      description: item.format === 'long' ? 'Long-form video published' : 'Short published',
+    })),
+    ...quest_completions.map(item => ({
+      id: item.id, title: quests[item.quest_key].title,
+      date: Temporal.Instant.from(item.completed_at).toZonedDateTimeISO(snapshot.profile.timezone).toPlainDate().toString(),
+      description: 'Quest completed',
+    })),
+  ].sort((a,b) => b.date.localeCompare(a.date))
   const activeWeeks = new Set(sessions.map(session => {
     const date = Temporal.PlainDate.from(session.local_day)
     return date.subtract({ days: date.dayOfWeek - 1 }).toString()
@@ -37,40 +50,48 @@ export function CreatorJourney({ snapshot }: { snapshot: Snapshot }) {
     <section className="journey-metrics" aria-label="Creative accomplishments">
       {[
         { label: 'Long-form videos published', value: long, icon: Film },
-        { label: 'Short-form videos published', value: total - long, icon: Video },
-        { label: 'Projects completed', value: total, icon: Check },
-        { label: 'Creative hours invested', value: hours(minutes), icon: Clock3 },
+        { label: 'Shorts published', value: short, icon: Video },
+        { label: 'Total content pieces published', value: total, icon: Check },
+        { label: 'Creative work sessions completed', value: sessionCount, icon: Clock3 },
       ].map(({ label, value, icon: Icon }) => <article className="panel journey-stat" key={label}>
         <Icon size={19} aria-hidden="true"/><strong>{value}</strong><span>{label}</span>
       </article>)}
     </section>
-    <section className="panel journey-milestones">
-      <h2>Publication milestones</h2>
-      <p>{next ? `${total} of ${next} published ${next === 1 ? 'video' : 'videos'} toward your next milestone` : 'All publication milestones reached'}</p>
-      <progress max={next ?? 100} value={Math.min(total, next ?? 100)} aria-label="Progress toward next publication milestone" />
-      <ul>{milestones.map(count => <li key={count} data-reached={total >= count}>
-        <span>{total >= count ? <Check size={15} aria-label="Reached"/> : count}</span>
-        {count === 1 ? 'First video' : `${count} videos`}
-      </li>)}</ul>
-    </section>
+    <div className="journey-publication-milestones">
+      <Milestones title="Long-form milestones" count={long} unit="videos"/>
+      <Milestones title="Short-form milestones" count={short} unit="Shorts"/>
+    </div>
     <section className="panel journey-effort">
       <div className="panel-heading"><h2>Creative effort</h2><label>Period <select value={period}
         onChange={event => setPeriod(event.target.value as typeof period)}>
         <option value="week">This week</option><option value="month">This month</option><option value="all">All time</option>
       </select></label></div>
-      <p><strong>{hours(visibleMinutes)} hours</strong> · {visible.length} sessions · {activeWeeks} active weeks overall</p>
+      <p><strong>{hours(visibleMinutes)} hours</strong> · {hours(minutes)} hours overall · {visible.length} logged sessions · {activeWeeks} active weeks overall</p>
       <ul>{activity.map(item => <li key={item.stage} style={{ '--stage': workflow[item.stage].color } as CSSProperties}>
         <span>{activities[item.stage]}</span>
         <progress max={Math.max(visibleMinutes, 1)} value={item.minutes} aria-label={`${activities[item.stage]} share of time`} />
         <strong>{hours(item.minutes)} h</strong>
       </li>)}</ul>
     </section>
-    {total > 0 && <section className="panel journey-publications">
-      <h2>Published work</h2>
-      {publications.slice().reverse().map(item => <div className="list-row" key={item.source_project_id}>
-        <div className="row-copy"><strong>{item.title}</strong><small>{item.format === 'long' ? 'Long-form' : 'Short-form'}</small></div>
-        <time dateTime={item.published_on}>{Temporal.PlainDate.from(item.published_on).toLocaleString('en', { dateStyle: 'medium' })}</time>
-      </div>)}
-    </section>}
+    <section className="panel journey-publications">
+      <h2>Accomplishment history</h2>
+      {history.length ? history.map(item => <div className="list-row" key={item.id}>
+        <div className="row-copy"><strong>{item.title}</strong><small>{item.description}</small></div>
+        <time dateTime={item.date}>{Temporal.PlainDate.from(item.date).toLocaleString('en',{dateStyle:'medium'})}</time>
+      </div>) : <p>Published projects and completed quests will appear here.</p>}
+    </section>
   </div>
+}
+
+function Milestones({title,count,unit}:{title:string;count:number;unit:string}) {
+  const next = milestones.find(value => value > count)
+  return <section className="panel journey-milestones" aria-label={title}>
+    <h2>{title}</h2>
+    <p>{next ? `${count} of ${next} toward the next milestone` : 'All milestones reached'}</p>
+    <progress max={next ?? 100} value={Math.min(count,next ?? 100)} aria-label={`Progress toward next ${title.toLowerCase()}`}/>
+    <ul>{milestones.map(value => <li key={value} data-reached={count>=value}>
+      <span>{count>=value ? <Check size={15} aria-label="Reached"/> : value}</span>
+      {value===1?'First publication':`${value} ${unit}`}
+    </li>)}</ul>
+  </section>
 }

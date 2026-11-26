@@ -9,11 +9,14 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { StudioDialog } from '@/components/ui/dialog'
 import { initial, rpc, skills, stageKey, workflow, supabase, type Block, type CalendarDay, type Project, type SessionDraft, type Snapshot, type Task, type Template, type Theme, type Topic, type WorkSession, type WorkflowStage } from '@/lib/studio'
-import { BlockEditor, CalendarDayEditor, Insights, Planner, TemplateEditor } from '@/components/planner'
+import { BlockEditor, CalendarDayEditor, Insights, Planner, currentDay, TemplateEditor } from '@/components/planner'
 import { ProjectEditor, SessionEditor, TaskEditor, WorkingDays } from '@/components/studio-forms'
 
-import { Portfolio, ProductionBoard, ProjectOptions, nextTask } from '@/components/production-board'
+import { Portfolio, ProductionBoard, ProjectOptions, productionProgress } from '@/components/production-board'
 import { ProductionTimeline, SpanEditor, type SpanItem } from '@/components/production-timeline'
+import { QuickQuests } from '@/components/quick-quests'
+import { quests, type QuestKey } from '@/lib/quests'
+import type { QuestCompletion } from '@/lib/studio'
 import { CreatorJourney } from '@/components/creator-journey'
 import { TopicBank, TopicEditor, TopicLink } from '@/components/topic-bank'
 
@@ -43,7 +46,6 @@ type Modal =
   | { kind: 'delete'; project?: Project; session?: WorkSession; task?: Task; topic?: Topic }
 
 const priority: Record<number, string> = { 1: 'High', 2: 'Medium', 3: 'Low' }
-const milestoneTitle = (value:string) => value.trim().toLowerCase().replace(/(^|\s)the\s+/g,'$1')
 const skillName = (id: string) => skills.find(skill => skill.id === id)?.name ?? id
 
 function Empty({ icon: Icon, title, children }: { icon: typeof Clock3; title: string; children: React.ReactNode }) {
@@ -56,6 +58,7 @@ export function Studio() {
   const [view, setView] = useState<View>('Projects')
   const [projectTab, setProjectTab] = useState<'board'|'timeline'|'checklist'>('board')
   const [scheduleUndo,setScheduleUndo] = useState<{ rpcName: string; args: Record<string,unknown> }[]>([])
+  const [additionalTasks,setAdditionalTasks] = useState(false)
   const [projectId, setProjectId] = useState<string>()
   const [modal, setModal] = useState<Modal>()
   const [notice, setNotice] = useState('')
@@ -65,8 +68,6 @@ export function Studio() {
   const [loading, setLoading] = useState(Boolean(supabase))
   const [timerStart, setTimerStart] = useState<number>()
   const [timerContext, setTimerContext] = useState<{ project?: string; skill?: string; goal?: number; task?: string }>({})
-  const [questProject, setQuestProject] = useState('')
-  const [questTask, setQuestTask] = useState('')
   const mutationLock = useRef(false)
   const [elapsed, setElapsed] = useState(0)
   const [timerDraft, setTimerDraft] = useState<SessionDraft>()
@@ -99,14 +100,12 @@ export function Studio() {
       setTimerStart(undefined)
       setTimerDraft(undefined)
       setTimerContext({})
-      setQuestProject('')
-      setQuestTask('')
       setScheduleUndo([])
       setDaysDraft(undefined)
       if (!nextUser) { setLoading(false); return }
       setLoading(true)
       reload = setTimeout(() => {
-        rpc<Snapshot>('studio_journey_snapshot', { p_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }).then(data => {
+        rpc<Snapshot>('studio_simple_snapshot', { p_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }).then(data => {
           if (active && request === loadSequence.current) setSnapshot(data)
         }).catch((failure: Error) => {
           if (active && request === loadSequence.current) setError(failure.message)
@@ -150,7 +149,7 @@ export function Studio() {
     try {
       await work()
       if (owner !== currentOwner.current) return
-      const data = await rpc<Snapshot>('studio_journey_snapshot')
+      const data = await rpc<Snapshot>('studio_simple_snapshot')
       if (owner !== currentOwner.current) return
       setSnapshot(data)
       setModal(undefined)
@@ -170,7 +169,7 @@ export function Studio() {
   function updateTask(task: Task, state: Task['status'], before?: string) {
     const message = state === task.status ? 'Task order saved.' : state === 'done'
       ? 'Task completed.' : task.status === 'done' ? 'Task reopened.' : 'Task status updated.'
-    void mutate(() => rpc('studio_board_task', { p_project: task.project_id, p_task: task.id, p_status: state, p_before: before ?? null }), message)
+    void mutate(() => rpc('studio_simple_board_task', { p_project: task.project_id, p_task: task.id, p_status: state, p_before: before ?? null }), message)
   }
 
   function remember(rpcName: string,args: Record<string,unknown>) {
@@ -214,9 +213,26 @@ export function Studio() {
 
   function removeProject(project: Project) { open({kind:'delete',project}) }
 
-  function moveProject(project: Project, stage: WorkflowStage) {
-    void mutate(() => rpc('studio_move_project',{p_id:project.id,p_stage:stage}),
-      stage==='published'?'Project marked published.':'Project stage updated.')
+  function moveProject(project: Project, stage: WorkflowStage, before?: string, reorder = false) {
+    void mutate(() => rpc('studio_project_board',{p_id:project.id,p_stage:stage,p_before:before??null,p_reorder:reorder}),
+      stage===project.workflow_stage?'Project order saved.':stage==='published'?'Project marked published.':'Project stage updated.')
+  }
+
+  function moveCalendarDay(entry: CalendarDay, day: string) {
+    const args = {p_task:entry.task_id,p_from:entry.day,p_to:day}
+    void mutate(() => rpc('studio_move_calendar_day',args),'Stage rescheduled.',()=>remember('studio_move_calendar_day',{
+      ...args,p_from:day,p_to:entry.day,
+    }))
+  }
+
+  function completeQuest(key: QuestKey) {
+    if (!user) {open({kind:'auth'});return}
+    const id = crypto.randomUUID()
+    void mutate(() => rpc('studio_one_click_quest',{p_id:id,p_key:key}),`${quests[key].title} completed.`)
+  }
+
+  function undoQuest(completion: QuestCompletion) {
+    void mutate(() => rpc('studio_one_click_quest',{p_id:completion.id,p_key:completion.quest_key,p_undo:true}),'Quest completion undone.')
   }
 
   function stopTimer() {
@@ -231,11 +247,13 @@ export function Studio() {
     open({ kind: 'session' })
   }
 
+  const today = currentDay(snapshot.profile.timezone).toString()
+  const acknowledged = snapshot.quest_completions.filter(item => item.completed_on === today
+    && (item.quest_key === 'short' || item.quest_key === 'long')).map(item => item.quest_key)
   const projects = snapshot.projects.filter(project => !project.archived).sort((a, b) => a.priority - b.priority)
   const selected = snapshot.projects.find(project => project.id === projectId)
   const projectById = new Map(snapshot.projects.map(project => [project.id, project]))
-  const recommendedSkill = nextTask(snapshot.tasks.filter(task=>task.project_id===questProject))?.skill_id
-  const queue = snapshot.tasks.filter(task => task.status !== 'done' && !projectById.get(task.project_id)?.archived && projectById.get(task.project_id)?.workflow_stage !== 'published')
+  const queue = snapshot.tasks.filter(task => task.production_key && task.status !== 'done' && !projectById.get(task.project_id)?.archived && projectById.get(task.project_id)?.workflow_stage !== 'published')
   const activity = [
     ...snapshot.sessions.map(session => ({
       id: session.id, date: session.started_at, title: `${session.minutes} min · ${skillName(session.skill_id)}`,
@@ -250,6 +268,7 @@ export function Studio() {
   function showProject(project: Project) {
     setView('Projects')
     setProjectId(project.id)
+    setAdditionalTasks(false)
     setProjectTab('board')
   }
 
@@ -275,7 +294,7 @@ export function Studio() {
   }
 
   function renderTaskTree(parent: string|null):React.ReactNode {
-    return selectedTasks.filter(task=>task.parent_id===parent).map(task=><div key={task.id}>
+    return selectedTasks.filter(task=>task.parent_id===parent && (additionalTasks || task.production_key)).map(task=><div key={task.id}>
       {renderTask(task)}{selectedTasks.some(child=>child.parent_id===task.id)&&<div className="nested-tasks">{renderTaskTree(task.id)}</div>}
     </div>)
   }
@@ -284,7 +303,7 @@ export function Studio() {
     const tasks = snapshot.tasks.filter(task => task.project_id === project.id)
     return <button key={project.id} className="project-row" onClick={() => showProject(project)}>
       <span className="project-icon"><FolderOpen size={20} /></span>
-      <span className="row-copy"><strong>{project.name}</strong><small>{project.archived ? 'Archived' : project.status} · {project.content_type} · {workflow[project.workflow_stage].name} · {tasks.filter(task => task.status === 'done').length}/{tasks.length} tasks complete</small></span>
+      <span className="row-copy"><strong>{project.name}</strong><small>{project.archived ? 'Archived' : project.status} · {project.content_type} · {workflow[project.workflow_stage].name} · {productionProgress(tasks)}% complete</small></span>
       <ChevronRight size={17} className="muted" />
     </button>
   }
@@ -366,7 +385,6 @@ export function Studio() {
       {view==='Projects' && selected && <div className="project-tabs actions">
         {(['board','timeline','checklist'] as const).map(tab=><button key={tab} className="button secondary compact"
           aria-pressed={projectTab===tab} onClick={()=>setProjectTab(tab)}>{tab==='board'?'Tasks':tab==='timeline'?'Project timeline':'Checklist'}</button>)}
-        <button className="text-button" onClick={()=>{setQuestProject(selected.id);setQuestTask('');setView('Quick Quests');setProjectId(undefined)}}>Quick Quests for this project</button>
       </div>}
       {(view==='Timeline' || (view==='Projects' && selected && projectTab==='timeline')) && <ProductionTimeline snapshot={snapshot}
         project={view==='Projects'?selected:undefined} busy={busy} undo={scheduleUndo.length?undoSchedule:undefined}
@@ -376,12 +394,14 @@ export function Studio() {
         convert={topic=>open({kind:'project',topic})} link={topic=>open({kind:'link',topic})} open={showProject}/>}
       {(view === 'Calendar' || view === 'Today') && <Planner snapshot={snapshot} todayOnly={view === 'Today'} busy={busy}
         reschedule={(block,start,end)=>saveBlock({...blockArgs(block),p_start:start,p_end:end})}
-        editDay={day=>open({kind:'calendar-day',day})}
+        editDay={day=>open({kind:'calendar-day',day})} moveDay={moveCalendarDay}
         timeDay={(day,start,end)=>saveDay(day,{p_task:day.task_id,p_day:day.day,p_start:start,p_end:end,p_timezone:snapshot.profile.timezone})}
         edit={block => open({ kind: 'block', block })} add={day => open({ kind: 'block', day })}
         openProject={id => { const project = projectById.get(id); if (project) showProject(project) }} />}
       {view === 'Creator Journey' && <CreatorJourney snapshot={snapshot}/>}
       {view === 'Today' && <>
+        <QuickQuests daily keys={['ideation','scriptwriting','editing','preparing']} busy={busy} latest={snapshot.quest_completions[0]} acknowledged={acknowledged}
+          complete={completeQuest} undo={undoQuest}/>
         <div className="dashboard-grid">
           <section className="panel">
             <div className="panel-heading"><h2><FolderOpen size={20} /> Current projects</h2><button className="text-button" onClick={() => { setView('Projects'); setProjectId(undefined) }}>View all</button></div>
@@ -401,68 +421,39 @@ export function Studio() {
         </section>
       </>}
 
-      {view === 'Quick Quests' && <section className="panel">
-        <div className="panel-heading"><h2>Quest presets</h2><button className="button secondary compact" onClick={() => open({ kind: 'template', category: 'quest' })}>New preset</button></div>
-        <label className="quest-project">Project<select value={questProject} onChange={event => { setQuestProject(event.target.value);setQuestTask('') }}>
-          <option value="">No project</option>{projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
-        </select></label>
-        {questProject && <label className="quest-project">Task<select value={questTask} onChange={event=>setQuestTask(event.target.value)}>
-          <option value="">No task</option>{snapshot.tasks.filter(task=>task.project_id===questProject).map(task=><option key={task.id} value={task.id}>{task.title}</option>)}
-        </select></label>}
-        <div className="quest-grid">{snapshot.templates.filter(item => item.kind === 'quest').sort((a,b)=>{
-          return Number(b.details.skill===recommendedSkill)-Number(a.details.skill===recommendedSkill)
-        }).map(template => {
-          const minutes = template.details.minutes
-          const skill = skills.find(item => item.id === template.details.skill)
-          const completed = snapshot.tasks.some(task => task.project_id === questProject && milestoneTitle(task.title) === milestoneTitle(template.name) && task.skill_id === skill?.id && task.status === 'done')
-          return <article className="quest-card" key={template.id} style={{ '--skill': workflow[stageKey(undefined,skill?.id)].color } as CSSProperties}>
-            <div><small>{skill?.name} · {minutes ? `${minutes} min focus` : 'Completion milestone'}{recommendedSkill && recommendedSkill===skill?.id && ' · Recommended'}</small><h3>{template.name}</h3></div>
-            <div className="actions"><button className="button primary compact" disabled={busy || (minutes ? timerStart !== undefined : completed || !questProject)} onClick={() => {
-              if (!minutes) {
-                void mutate(() => rpc('studio_quest_complete', { p_project: questProject, p_template: template.id }), 'Milestone completed.')
-                return
-              }
-              setElapsed(0)
-              setTimerContext({ project: questProject, skill: skill?.id, goal: minutes, task: questTask })
-              setTimerStart(Date.now())
-              setNotice(`${minutes}-minute focus timer started.`)
-            }}>{minutes ? 'Start timer' : completed ? 'Completed' : 'Complete milestone'}</button>
-            {minutes && <button className="text-button" onClick={()=>{
-              setTimerDraft({started:new Date(Date.now()-minutes*60000).toISOString(),minutes,skill:skill?.id,project:questProject,task:questTask,method:'manual'})
-              open({kind:'session'})
-            }}>Log time</button>}
-            <button className="text-button" onClick={() => open({ kind: 'template', category: 'quest', template })}>Edit preset</button></div>
-          </article>
-        })}</div>
-      </section>}
+      {view === 'Quick Quests' && <QuickQuests busy={busy} latest={snapshot.quest_completions[0]} acknowledged={acknowledged}
+        complete={completeQuest} undo={undoQuest}/>}
       {view === 'Projects' && (selected ? <>
         <section className="panel project-details">
           <div className="panel-heading"><h2>Production pipeline</h2><Badge>{selected.archived ? 'Archived' : workflow[selected.workflow_stage].name}</Badge></div>
-          <div className="pipeline">{snapshot.stages.filter(stage => stage.project_id === selected.id).map(stage =>
-            <span key={stage.id} className="stage-label" style={{ '--stage': workflow[stageKey(stage.name)].color } as CSSProperties}>{stage.name}</span>)}
-            {!snapshot.stages.some(stage => stage.project_id === selected.id) && <small>Add a stage from a production preset.</small>}</div>
+          <div className="pipeline">{Object.entries(workflow).map(([key,stage]) =>
+            <span key={key} className="stage-label" aria-current={key===selected.workflow_stage?'step':undefined}
+              style={{ '--stage': stage.color } as CSSProperties}>{stage.name}</span>)}</div>
           {selected.target_publication_date && <p>Target publication · {selected.target_publication_date}</p>}
           {selected.actual_publication_date && <p>Published · {selected.actual_publication_date}</p>}
           {selected.notes && <details><summary>Notes</summary><p>{selected.notes}</p></details>}
           {selected.script && <details><summary>Script</summary><p>{selected.script}</p></details>}
-          {!selected.archived && <form className="apply-template" onSubmit={event => {
+          {!selected.archived && <details className="optional-presets"><summary>Add a preset to additional tasks</summary><form className="apply-template" onSubmit={event => {
             event.preventDefault()
             const data = new FormData(event.currentTarget)
-            void mutate(() => rpc('studio_apply_template', { p_project: selected.id, p_template: data.get('preset'), p_stage: data.get('stage') || null }), 'Production preset added.')
+            void mutate(() => rpc('studio_apply_template', { p_project: selected.id, p_template: data.get('preset'), p_stage: data.get('stage') || null }), 'Production preset added.',()=>setAdditionalTasks(true))
           }}>
             <label>Add a preset<select name="preset" required defaultValue="">
-              <option value="" disabled>Choose stage or task</option>{snapshot.templates.filter(item => item.kind === 'stage' || item.kind === 'task').map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+              <option value="" disabled>Choose preset</option>{snapshot.templates.filter(item => item.kind !== 'quest').map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select></label>
             <label>Stage for task<select name="stage" defaultValue={selected.production_stage_id ?? ''}><option value="">No stage</option>
               {snapshot.stages.filter(stage => stage.project_id === selected.id).map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></label>
             <button className="button secondary" disabled={busy}>Add preset</button>
-          </form>}
+          </form></details>}
         </section>
-        {projectTab==='board' && <ProductionBoard snapshot={snapshot} project={selected} busy={busy} move={updateTask}
+        {projectTab==='board' && <ProductionBoard key={selected.id} snapshot={snapshot} project={selected} busy={busy} move={updateTask} additional={additionalTasks} setAdditional={setAdditionalTasks}
           add={initialStatus=>open({kind:'task',project:selected,initialStatus})} edit={openTask}
           schedule={task=>open({kind:'block',projectId:selected.id,taskId:task.id})}/>}
         {projectTab==='checklist' && <section className="panel activity-panel">
           <div className="panel-heading"><h2>Production checklist</h2></div>
+          {selectedTasks.some(task => !task.production_key) && <button className="button secondary compact additional-tasks"
+            onClick={()=>setAdditionalTasks(value=>!value)} aria-pressed={additionalTasks}>
+            {additionalTasks?'Hide additional tasks':'Show additional tasks'}</button>}
           {renderTaskTree(null)}
         </section>}
       </> : <Portfolio snapshot={snapshot} open={showProject} busy={busy} move={moveProject}
@@ -522,7 +513,7 @@ export function Studio() {
               setError('')
               const owner = currentOwner.current
               try {
-                const data = await rpc<Snapshot>('studio_journey_snapshot')
+                const data = await rpc<Snapshot>('studio_simple_snapshot')
                 if (owner !== currentOwner.current) return
                 const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
                 const link = document.createElement('a')
@@ -551,17 +542,18 @@ export function Studio() {
     {modal?.kind === 'template' && <TemplateEditor kind={modal.category} template={modal.template} busy={busy} error={modalError}
       close={() => setModal(undefined)} save={args => void mutate(() => rpc('studio_template', args), args.p_delete ? 'Preset deleted.' : 'Preset saved.')} />}
     {modal?.kind === 'project' && <ProjectEditor snapshot={snapshot} project={modal.project} topic={modal.topic} busy={busy} error={modalError} close={() => setModal(undefined)}
-      remove={project => open({ kind: 'delete', project })} save={(args, id) => void mutate(() => rpc(modal.project?'studio_edit_workflow_project':'studio_create_production', args), 'Project saved.', () => {
+      remove={project => open({ kind: 'delete', project })} save={(args, id) => void mutate(() => rpc(modal.project?'studio_edit_workflow_project':'studio_create_simple', args), 'Project saved.', () => {
         setView('Projects')
         setProjectId(id)
+        setAdditionalTasks(false)
         setProjectTab('board')
       })} />}
     {modal?.kind === 'task' && <TaskEditor snapshot={snapshot} project={modal.project} task={modal.task} initialStatus={modal.initialStatus}
       busy={busy} error={modalError} close={() => setModal(undefined)}
       action={(task,action)=>action==='delete'?open({kind:'delete',task}):void mutate(()=>rpc('studio_task_action',{
         p_project:task.project_id,p_task:task.id,p_action:action,p_new_id:crypto.randomUUID(),
-      }),'Task duplicated.')}
-      save={args => void mutate(() => rpc('studio_edit_board_task', args), 'Task saved.')} />}
+      }),'Task duplicated.',()=>setAdditionalTasks(true))}
+      save={args => void mutate(() => rpc('studio_simple_edit_task', args), 'Task saved.',()=>{if (!modal.task?.production_key) setAdditionalTasks(true)})} />}
     {modal?.kind === 'session' && <SessionEditor snapshot={snapshot} session={modal.session} draft={modal.session ? undefined : timerDraft}
       busy={busy} error={modalError} close={() => setModal(undefined)} remove={session => open({ kind: 'delete', session })}
       save={args => void mutate(() => rpc('studio_log_session', args), 'Work session saved.', () => {

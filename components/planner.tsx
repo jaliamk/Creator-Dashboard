@@ -19,8 +19,8 @@ function dateLabel(day: Temporal.PlainDate, options: Intl.DateTimeFormatOptions)
 
 type CalendarBlock = Block & { daily?: CalendarDay }
 
-export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, busy, reschedule, timeDay }: {
-  snapshot: Snapshot; todayOnly?: boolean; edit: (block: Block) => void; editDay: (day: CalendarDay) => void; timeDay: (day: CalendarDay,start: string,end: string) => void; add: (day: string) => void; openProject: (id: string) => void; busy: boolean; reschedule: (block: Block,start: string,end: string) => void
+export function Planner({ snapshot, todayOnly, edit, editDay, moveDay, add, openProject, busy, reschedule, timeDay }: {
+  snapshot: Snapshot; todayOnly?: boolean; edit: (block: Block) => void; editDay: (day: CalendarDay) => void; moveDay: (day: CalendarDay, date: string) => void; timeDay: (day: CalendarDay,start: string,end: string) => void; add: (day: string) => void; openProject: (id: string) => void; busy: boolean; reschedule: (block: Block,start: string,end: string) => void
 }) {
   const [offset, setOffset] = useState(0)
   const [timeline, setTimeline] = useState(false)
@@ -32,11 +32,22 @@ export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, 
   const monday = today.subtract({ days: today.dayOfWeek - 1 }).add({ weeks: offset })
   const days = todayOnly ? [today] : Array.from({ length: 7 }, (_, i) => monday.add({ days: i }))
   const time = new Intl.DateTimeFormat('en', { timeZone: zone, hour: 'numeric', minute: '2-digit' })
+  const [showCompleted,setShowCompleted] = useState(false)
   const active = snapshot.projects.filter(project => !project.archived)
-  const projectIds = new Set(active.map(project => project.id))
+  const byProject = new Map(active.map(project => [project.id,project]))
+  const byTask = new Map(snapshot.tasks.map(task => [task.id,task]))
   const dailyId = (day: CalendarDay) => `${day.task_id}:${day.day}`
-  const daily = snapshot.calendar_days.filter(day => projectIds.has(day.project_id))
-  const timed: CalendarBlock[] = [...snapshot.blocks.filter(block => projectIds.has(block.project_id)), ...daily.flatMap(day =>
+  const daily = snapshot.calendar_days.filter(day => {
+    const project = byProject.get(day.project_id)
+    const task = byTask.get(day.task_id)
+    return project && task?.production_key && (showCompleted || task.status !== 'done')
+      && (project.workflow_stage !== 'published' || day.day < today.toString())
+  })
+  const timed: CalendarBlock[] = [...snapshot.blocks.filter(block => {
+    const project = byProject.get(block.project_id)
+    return project && (project.workflow_stage!=='published' || Date.parse(block.starts_at)<today.toZonedDateTime(zone).epochMilliseconds)
+      && (showCompleted || (block.status==='planned' && (!block.task_id || byTask.get(block.task_id)?.status!=='done')))
+  }), ...daily.flatMap(day =>
     day.starts_at && day.ends_at ? [{
       id: dailyId(day), project_id: day.project_id, task_id: day.task_id, starts_at: day.starts_at,
       ends_at: day.ends_at, timezone: day.timezone ?? zone, status: 'planned' as const, notes: '', daily: day,
@@ -45,7 +56,7 @@ export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, 
     const project = snapshot.projects.find(item => item.id === projectId)
     const task = snapshot.tasks.find(item => item.id === taskId)
     const phase = snapshot.stages.find(item => item.id === task?.stage_id)
-    return workflow[task ? stageKey(phase?.name, task.skill_id) : project?.workflow_stage ?? 'ideation'].color
+    return workflow[task ? task.production_key ?? stageKey(phase?.name, task.skill_id) : project?.workflow_stage ?? 'ideation'].color
   }
   function saveTime(block: CalendarBlock, start: number, end: number) {
     if (block.daily) timeDay(block.daily,new Date(start).toISOString(),new Date(end).toISOString())
@@ -55,8 +66,11 @@ export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, 
     event.preventDefault()
     event.stopPropagation()
     if(busy) return
-    const block=timed.find(item=>item.id===event.dataTransfer.getData('application/creator-block'))
-    if(!block || (block.daily && (block.daily.day !== day || from === undefined))) return
+    const dragged = event.dataTransfer.getData('application/creator-block')
+    const entry = daily.find(item => dailyId(item)===dragged)
+    if (entry && entry.day!==day) { moveDay(entry,day);return }
+    const block=timed.find(item=>item.id===dragged)
+    if(!block || (block.daily && from===undefined)) return
     const duration=Date.parse(block.ends_at)-Date.parse(block.starts_at)
     try {
       let start: number
@@ -104,6 +118,7 @@ export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, 
     <div className="panel-heading planner-heading">
       <div><h2><CalendarDays size={20} />{todayOnly ? 'Today’s schedule' : dateLabel(monday, { month: 'long', year: 'numeric' })}</h2>
         <p className="muted">{todayOnly ? dateLabel(today, { dateStyle: 'full' }) : 'Weekly calendar'} · {zone}</p></div>
+      <label className="calendar-completed"><input type="checkbox" checked={showCompleted} onChange={event=>setShowCompleted(event.target.checked)}/> Show completed</label>
       {!todayOnly && <div className="actions">
         <button className="icon-button" aria-label="Previous week" onClick={() => setOffset(offset - 1)}><ChevronLeft size={18} /></button>
         <button className="button secondary compact" onClick={() => setOffset(0)}>This week</button>
@@ -124,8 +139,9 @@ export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, 
         const blocks = timed.filter(block => block.daily ? block.daily.day === key :
           Date.parse(block.starts_at) < until && Date.parse(block.ends_at) > from)
           .sort((a,b) => Date.parse(a.starts_at) - Date.parse(b.starts_at))
-        const due = snapshot.tasks.filter(task => task.due_date === key && task.status !== 'done' && !entries.some(entry => entry.task_id === task.id) && active.some(project => project.id === task.project_id))
-        const publishing = active.filter(project => (project.actual_publication_date ?? project.target_publication_date) === key)
+        const due = snapshot.tasks.filter(task => task.production_key && task.due_date === key && (showCompleted || task.status!=='done') && !entries.some(entry=>entry.task_id===task.id) && byProject.get(task.project_id)?.workflow_stage!=='published' && byProject.has(task.project_id))
+        const targets = active.filter(project => project.workflow_stage!=='published' && project.target_publication_date===key && !snapshot.publications.some(item=>item.source_project_id===project.id))
+        const publishing = snapshot.publications.filter(item => item.published_on===key)
         const dayMinutes = (until - from) / 60000
         const rowHeight = 55 * dayMinutes / 1440
         const laneEnds: number[] = []
@@ -144,7 +160,7 @@ export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, 
           return <button key={block.id} className={`calendar-event event-${block.status}`} style={{ borderInlineStartColor: color }}
             draggable={!busy} onDragStart={event=>{event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('application/creator-block',block.id)}} onClick={() => block.daily ? editDay(block.daily) : edit(block)}>
             <small>{time.format(block.daily ? Date.parse(block.starts_at) : Math.max(from, Date.parse(block.starts_at)))}–{time.format(block.daily ? Date.parse(block.ends_at) : Math.min(until, Date.parse(block.ends_at)))}{block.status !== 'planned' && ` · ${block.status}`}</small>
-            <strong>{task?.title ?? project?.name ?? 'Work block'}</strong>{task && <small>{project?.name}{task.status==='done'?' · Task done':''}</small>}
+            <strong>{task ? workflow[task.production_key ?? stageKey(snapshot.stages.find(stage=>stage.id===task.stage_id)?.name,task.skill_id)].name : project?.name ?? 'Work block'}</strong>{task && <small>{project?.name}{task.status==='done'?' · Task done':''}</small>}
           </button>
         }
         return <article className={`calendar-day ${key === today.toString() ? 'calendar-current' : ''}`} key={key}
@@ -153,14 +169,19 @@ export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, 
           <header><div><small>{dateLabel(day, { weekday: 'short' })}</small><strong>{day.day}</strong></div>
             <button className="icon-button" aria-label={`Schedule work on ${key}`} onClick={() => add(key)}><Plus size={16} /></button>
           </header>
-          {publishing.map(project => <button key={project.id} className="calendar-event calendar-marker" style={{ borderInlineStartColor: workflow[project.actual_publication_date ? 'published' : 'preparing'].color }} onClick={() => openProject(project.id)}>
-            <small>{project.actual_publication_date ? 'Published' : 'Publish target'}</small><strong>{project.name}</strong></button>)}
+          {publishing.map(publication => <button key={publication.source_project_id} className="calendar-event calendar-marker"
+            disabled={!byProject.has(publication.source_project_id)} style={{ borderInlineStartColor:workflow.published.color }}
+            onClick={()=>openProject(publication.source_project_id)}><small>Published</small><strong>{publication.title}</strong></button>)}
+          {targets.map(project => <button key={project.id} className="calendar-event calendar-marker"
+            style={{ borderInlineStartColor:workflow.preparing.color }} onClick={()=>openProject(project.id)}>
+            <small>Publish target</small><strong>{project.name}</strong></button>)}
           {due.map(task => <button key={task.id} className="calendar-event calendar-marker" style={{ borderInlineStartColor: phaseColor(task.project_id,task.id) }} onClick={() => openProject(task.project_id)}>
             <small>Task due</small><strong>{task.title}</strong></button>)}
           {entries.filter(entry => !entry.starts_at).map(entry => {
             const task = snapshot.tasks.find(item => item.id === entry.task_id)
             const project = active.find(item => item.id === entry.project_id)
-            return <button key={dailyId(entry)} className="calendar-event calendar-all-day" onClick={() => editDay(entry)}
+            return <button key={dailyId(entry)} className="calendar-event calendar-all-day" onClick={() => editDay(entry)} draggable={!busy}
+              onDragStart={event=>{event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('application/creator-block',dailyId(entry))}}
               style={{ borderInlineStartColor: phaseColor(entry.project_id,entry.task_id) }}>
               <small>All day{task?.status === 'done' ? ' · Done' : ''}</small><strong>{task?.title}</strong><small>{project?.name}</small>
             </button>
@@ -187,7 +208,7 @@ export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, 
               </div>
             })}
           </div> : blocks.map(renderBlock)}
-          {!timeline && !blocks.length && !entries.length && !publishing.length && !due.length && <small className="calendar-empty">No work scheduled</small>}
+          {!timeline && !blocks.length && !entries.length && !publishing.length && !targets.length && !due.length && <small className="calendar-empty">No work scheduled</small>}
         </article>
       })}
     </div>
@@ -267,7 +288,7 @@ export function BlockEditor({ snapshot, block, duplicate, copy, day, projectId, 
   snapshot: Snapshot; block?: Block; duplicate?: boolean; copy: (block: Block) => void; day?: string; projectId?: string; taskId?: string
 }) {
   const [id] = useState(() => !duplicate && block ? block.id : crypto.randomUUID())
-  const available = snapshot.projects.filter(project => !project.archived || project.id === block?.project_id)
+  const available = snapshot.projects.filter(project => (!project.archived && project.workflow_stage!=='published') || project.id === block?.project_id)
   const [project, setProject] = useState(block?.project_id ?? projectId ?? available[0]?.id ?? '')
   const [task, setTask] = useState(block?.task_id ?? taskId ?? '')
   const [failure, setFailure] = useState('')

@@ -386,3 +386,29 @@ small { font-size: .8125rem; }
 @media (min-width:1180px) {
   .portfolio-kanban { grid-template-columns:repeat(6,minmax(8.75rem,1fr)); }
 }
+
+.portfolio-column.drop-target,.kanban-column.drop-target {
+  outline:2px solid var(--stage,var(--primary));
+  outline-offset:-2px;
+  background:color-mix(in srgb,var(--stage,var(--primary)) 22%,var(--surface));
+}
+.additional-tasks { margin-block-end:10px; }
+.optional-presets { margin-block-start:12px; }
+.stage-label[aria-current="step"] { outline:2px solid var(--stage); outline-offset:1px; }
+.calendar-completed { display:flex; align-items:center; gap:6px; font-size:.85rem; white-space:nowrap; }
+.calendar-all-day[draggable="true"] { cursor:grab; }
+.journey-publication-milestones { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr)); gap:12px; }
+.gantt-axis { min-height:68px; }
+.gantt-month { position:absolute; inset-block-start:4px; padding-inline:4px; font-size:.8rem; font-weight:750; white-space:nowrap; }
+.gantt-tick { inset-block-start:25px; display:grid; gap:0; padding:2px 4px; text-align:center; }
+.gantt-tick small { font-size:.68rem; }
+.gantt-tick strong { font-size:.85rem; }
+.gantt-track {
+  background-image:linear-gradient(to right,color-mix(in srgb,var(--muted) 35%,transparent) 1px,transparent 1px),
+    var(--gantt-grid-lines,linear-gradient(to right,var(--line) 1px,transparent 1px)),
+    linear-gradient(to right,transparent var(--gantt-weekend),color-mix(in srgb,var(--muted) 13%,transparent) var(--gantt-weekend));
+  background-size:var(--gantt-week) 100%,var(--gantt-width) 100%,var(--gantt-week) 100%;
+  background-position:var(--gantt-week-offset) 0,0 0,var(--gantt-week-offset) 0;
+}
+.gantt:not([data-scale="month"]) .gantt-track { background-size:var(--gantt-week) 100%,var(--gantt-step) 100%,var(--gantt-week) 100%; }
+.gantt[data-scale="month"] .gantt-axis { min-height:35px; }

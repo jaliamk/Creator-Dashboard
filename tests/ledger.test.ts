@@ -248,3 +248,51 @@ it('synchronizes daily scheduling while retaining sessions and published statist
   expect((await db.query('select id,project_id,minutes from public.work_sessions where id=$1',[a])).rows).toEqual([{id:a,project_id:null,minutes:42}])
   expect((await db.query('select format from public.publications order by format')).rows).toEqual([{format:'long'},{format:'short'}])
 })
+
+it('migrates granular work, synchronizes stage progress, shifts calendar days, and records quests idempotently', async () => {
+  await db.exec('reset role')
+  for (const [table,migration] of [
+    ['work_blocks','20261122000100_planner.sql'],
+    ['topics','20261122000200_project_centric.sql'],
+    ['publications','20261126000000_workflow.sql'],
+  ]) {
+    const present=(await db.query<{ exists:boolean }>('select to_regclass($1) is not null as exists',[`public.${table}`])).rows[0].exists
+    if(!present) await db.exec(readFileSync(new URL(`../supabase/migrations/${migration}`,import.meta.url),'utf8'))
+  }
+  await login(owner)
+  await setTask('done',12)
+  const original=await ledger()
+  await log(a,'2026-11-26T17:00:00Z',30)
+  await db.exec('reset role')
+  await db.query("update public.tasks set description='Legacy notes',planned_start='2026-11-27',planned_end='2026-11-28' where id=$1",[task])
+  await db.exec(readFileSync(new URL('../supabase/migrations/20261126000100_simple_production.sql',import.meta.url),'utf8'))
+  await login(owner)
+  expect((await ledger()).some(item=>item.source_id===original[0].source_id)).toBe(true)
+  expect((await db.query('select description,status,production_key from public.tasks where id=$1',[task])).rows)
+    .toEqual([{description:'Legacy notes',status:'done',production_key:null}])
+  const primary = (await db.query<{ id:string }>("select id from public.tasks where project_id=$1 and production_key='editing' and planned_start='2026-11-27'",[project])).rows[0].id
+  await db.query("select public.studio_time_task_day($1,'2026-11-27','2026-11-27T14:00Z','2026-11-27T15:00Z','America/New_York')",[primary])
+  await db.query("select public.studio_move_calendar_day($1,'2026-11-27','2026-11-28')",[primary])
+  expect((await db.query("select day::text,starts_at is not null as timed from public.task_calendar_days where task_id=$1 order by day",[primary])).rows)
+    .toEqual([{day:'2026-11-28',timed:true},{day:'2026-11-29',timed:false}])
+  await db.query("select public.studio_project_board($1,'editing')",[project])
+  expect((await db.query("select production_key from public.tasks where project_id=$1 and production_key is not null and status='done' order by production_key",[project])).rows)
+    .toEqual([{production_key:'filming'},{production_key:'ideation'},{production_key:'scriptwriting'}])
+  await db.query("select public.studio_simple_board_task($1,$2,'done')",[project,primary])
+  expect((await db.query('select workflow_stage from public.projects where id=$1',[project])).rows).toEqual([{workflow_stage:'preparing'}])
+  await db.query("select public.studio_project_board($1,'scriptwriting')",[project])
+  expect((await db.query('select status from public.tasks where id=$1',[primary])).rows).toEqual([{status:'done'}])
+  expect((await db.query('select source_project_id from public.publications')).rows).toEqual([])
+  const meta={type:'Short-form video',priority:2,status:'active',notes:'',script:''}
+  await db.query("select public.studio_create_simple($1,'Fresh cut','',$2,null,'2026-11-26',true,true)",[c,meta])
+  expect((await db.query('select production_key from public.tasks where project_id=$1',[c])).rows).toHaveLength(5)
+  await db.query("select public.studio_project_board($1,'scriptwriting',$2,true)",[c,project])
+  expect((await db.query("select id from public.projects where workflow_stage='scriptwriting' order by board_position",[ ])).rows)
+    .toEqual([{id:c},{id:project}])
+  for(const stage of ['published','editing','published']) await db.query('select public.studio_project_board($1,$2)',[project,stage])
+  for(let count=0;count<2;count++) await db.query("select public.studio_one_click_quest($1,'editing')",[b])
+  expect((await db.query('select id from public.quest_completions')).rows).toEqual([{id:b}])
+  await db.query("select public.studio_one_click_quest($1,'editing',true)",[b])
+  expect((await db.query('select id from public.quest_completions')).rows).toEqual([])
+  expect((await db.query('select source_project_id from public.publications')).rows).toEqual([{source_project_id:project}])
+})
