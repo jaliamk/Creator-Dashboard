@@ -126,6 +126,51 @@ test('convert a topic, move and resize plans, and duplicate work blocks', async 
   await expect(page.getByRole('status')).toContainText('Task completed.')
   await page.getByRole('button', { name:'Project timeline', exact:true }).click()
   const timeline=page.getByRole('region', { name:'Project timeline' })
+  const viewport = timeline.getByLabel('Scrollable production timeline', { exact: true })
+  const scrollbar = timeline.getByRole('slider', { name: 'Scroll timeline horizontally' })
+  const originalSize = page.viewportSize()!
+  for (const width of [1500, 1024, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    await expect(scrollbar).toBeVisible()
+    const layout = await viewport.evaluate(element => {
+      element.scrollTo(240, 160)
+      const root = element.getBoundingClientRect()
+      const axis = element.querySelector('.gantt-axis')!.getBoundingClientRect()
+      const axisTrack = element.querySelector('.gantt-axis .gantt-track')!.getBoundingClientRect()
+      const row = element.querySelectorAll('.gantt-line')[10]
+      const label = row.querySelector('.gantt-label')!.getBoundingClientRect()
+      const track = row.querySelector('.gantt-track')!.getBoundingClientRect()
+      return {
+        pageWidth: document.documentElement.scrollWidth,
+        availableWidth: document.documentElement.clientWidth,
+        horizontal: element.scrollLeft,
+        vertical: element.scrollTop,
+        stickyLabel: Math.abs(label.left - root.left),
+        stickyHeader: Math.abs(axis.top - root.top),
+        aligned: Math.abs(axisTrack.left - track.left),
+      }
+    })
+    expect(layout.pageWidth).toBe(layout.availableWidth)
+    expect(layout.horizontal).toBeGreaterThan(0)
+    expect(layout.vertical).toBeGreaterThan(0)
+    expect(layout.stickyHeader).toBeLessThan(2)
+    expect(layout.stickyLabel).toBeLessThan(2)
+    expect(layout.aligned).toBeLessThan(1)
+    await scrollbar.focus()
+    await scrollbar.press('Home')
+    await expect.poll(() => viewport.evaluate(element => element.scrollLeft)).toBe(0)
+    await scrollbar.press('ArrowRight')
+    await expect.poll(() => viewport.evaluate(element => element.scrollLeft)).toBeGreaterThan(0)
+    await timeline.getByRole('button', { name: 'Today', exact: true }).click()
+    const indicatorVisible = await viewport.evaluate(element => {
+      const label = element.querySelector('.gantt-axis .gantt-label')!.getBoundingClientRect()
+      const marker = element.querySelector('.gantt-axis .gantt-now')!.getBoundingClientRect()
+      return marker.x >= label.right - 1 && marker.x < element.getBoundingClientRect().right
+    })
+    expect(indicatorVisible).toBe(true)
+  }
+  await page.setViewportSize(originalSize)
+  await viewport.evaluate(element => element.scrollTo(0, 0))
   await expect(timeline.getByRole('button', { name:'Reopen Finish script', exact:true })).toBeVisible()
   const editingBar=timeline.getByRole('button',{name:'Move or edit Editing',exact:true}).locator('..')
   const edge=editingBar.locator('.gantt-handle.end')
