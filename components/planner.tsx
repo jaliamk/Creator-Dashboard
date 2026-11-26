@@ -2,7 +2,7 @@ import { useRef, useState, type DragEvent, type PointerEvent } from 'react'
 import { Temporal } from '@js-temporal/polyfill'
 import { ArrowDown, ArrowUp, CalendarDays, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { StudioDialog } from '@/components/ui/dialog'
-import { localInput, skills, type Block, type Snapshot, type TaskPreset, type Template } from '@/lib/studio'
+import { localInput, skills, stageKey, workflow, type Block, type CalendarDay, type Snapshot, type TaskPreset, type Template } from '@/lib/studio'
 
 type Args = Record<string, unknown>
 type EditorProps = { busy: boolean; error: string; close: () => void; save: (args: Args) => void }
@@ -17,8 +17,10 @@ function dateLabel(day: Temporal.PlainDate, options: Intl.DateTimeFormatOptions)
   return day.toLocaleString('en', options)
 }
 
-export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, reschedule }: {
-  snapshot: Snapshot; todayOnly?: boolean; edit: (block: Block) => void; add: (day: string) => void; openProject: (id: string) => void; busy: boolean; reschedule: (block: Block,start: string,end: string) => void
+type CalendarBlock = Block & { daily?: CalendarDay }
+
+export function Planner({ snapshot, todayOnly, edit, editDay, add, openProject, busy, reschedule, timeDay }: {
+  snapshot: Snapshot; todayOnly?: boolean; edit: (block: Block) => void; editDay: (day: CalendarDay) => void; timeDay: (day: CalendarDay,start: string,end: string) => void; add: (day: string) => void; openProject: (id: string) => void; busy: boolean; reschedule: (block: Block,start: string,end: string) => void
 }) {
   const [offset, setOffset] = useState(0)
   const [timeline, setTimeline] = useState(false)
@@ -31,12 +33,30 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, res
   const days = todayOnly ? [today] : Array.from({ length: 7 }, (_, i) => monday.add({ days: i }))
   const time = new Intl.DateTimeFormat('en', { timeZone: zone, hour: 'numeric', minute: '2-digit' })
   const active = snapshot.projects.filter(project => !project.archived)
+  const projectIds = new Set(active.map(project => project.id))
+  const dailyId = (day: CalendarDay) => `${day.task_id}:${day.day}`
+  const daily = snapshot.calendar_days.filter(day => projectIds.has(day.project_id))
+  const timed: CalendarBlock[] = [...snapshot.blocks.filter(block => projectIds.has(block.project_id)), ...daily.flatMap(day =>
+    day.starts_at && day.ends_at ? [{
+      id: dailyId(day), project_id: day.project_id, task_id: day.task_id, starts_at: day.starts_at,
+      ends_at: day.ends_at, timezone: day.timezone ?? zone, status: 'planned' as const, notes: '', daily: day,
+    }] : [])]
+  const phaseColor = (projectId: string, taskId: string | null) => {
+    const project = snapshot.projects.find(item => item.id === projectId)
+    const task = snapshot.tasks.find(item => item.id === taskId)
+    const phase = snapshot.stages.find(item => item.id === task?.stage_id)
+    return workflow[task ? stageKey(phase?.name, task.skill_id) : project?.workflow_stage ?? 'ideation'].color
+  }
+  function saveTime(block: CalendarBlock, start: number, end: number) {
+    if (block.daily) timeDay(block.daily,new Date(start).toISOString(),new Date(end).toISOString())
+    else reschedule(block,new Date(start).toISOString(),new Date(end).toISOString())
+  }
   function drop(event: DragEvent<HTMLElement>, day: string, from?: number, until?: number) {
     event.preventDefault()
     event.stopPropagation()
     if(busy) return
-    const block=snapshot.blocks.find(item=>item.id===event.dataTransfer.getData('application/creator-block'))
-    if(!block) return
+    const block=timed.find(item=>item.id===event.dataTransfer.getData('application/creator-block'))
+    if(!block || (block.daily && (block.daily.day !== day || from === undefined))) return
     const duration=Date.parse(block.ends_at)-Date.parse(block.starts_at)
     try {
       let start: number
@@ -48,7 +68,8 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, res
         const clock=localInput(block.starts_at,zone).slice(11)
         start=Date.parse(localInstant(`${day}T${clock}`,zone))
       }
-      if(start!==Date.parse(block.starts_at)) reschedule(block,new Date(start).toISOString(),new Date(start+duration).toISOString())
+      if (block.daily && from !== undefined && until !== undefined) start = Math.max(from, Math.min(start, until - duration))
+      if(start!==Date.parse(block.starts_at)) saveTime(block,start,start+duration)
       setMoveError('')
     }catch{setMoveError('Choose a different time outside the daylight-saving transition.')}
   }
@@ -63,7 +84,7 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, res
     const height=row.getBoundingClientRect().height
     return Math.round((event.clientY-(resize.current?.y??event.clientY))/height*minutes/15)*15
   }
-  function finishResize(event:PointerEvent<HTMLElement>,block:Block,minutes:number){
+  function finishResize(event:PointerEvent<HTMLElement>,block:CalendarBlock,minutes:number,from:number,until:number){
     const operation=resize.current
     const row=event.currentTarget.closest<HTMLElement>('.calendar-hours')
     if(!operation || !row)return
@@ -76,7 +97,7 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, res
     const minimum=Math.min(end-start,900000)
     const nextStart=operation.edge==='start'?Math.min(start+delta,end-minimum):start
     const nextEnd=operation.edge==='end'?Math.max(end+delta,start+minimum):end
-    reschedule(block,new Date(nextStart).toISOString(),new Date(nextEnd).toISOString())
+    saveTime(block,block.daily?Math.max(from,nextStart):nextStart,block.daily?Math.min(until,nextEnd):nextEnd)
   }
 
   return <section className="panel planner-panel" aria-label={todayOnly ? 'Today’s schedule' : 'Weekly production calendar'}>
@@ -99,8 +120,11 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, res
         const key = day.toString()
         const from = day.toZonedDateTime(zone).epochMilliseconds
         const until = day.add({ days: 1 }).toZonedDateTime(zone).epochMilliseconds
-        const blocks = snapshot.blocks.filter(block => Date.parse(block.starts_at) < until && Date.parse(block.ends_at) > from)
-        const due = snapshot.tasks.filter(task => task.due_date === key && task.status !== 'done' && active.some(project => project.id === task.project_id))
+        const entries = daily.filter(entry => entry.day === key)
+        const blocks = timed.filter(block => block.daily ? block.daily.day === key :
+          Date.parse(block.starts_at) < until && Date.parse(block.ends_at) > from)
+          .sort((a,b) => Date.parse(a.starts_at) - Date.parse(b.starts_at))
+        const due = snapshot.tasks.filter(task => task.due_date === key && task.status !== 'done' && !entries.some(entry => entry.task_id === task.id) && active.some(project => project.id === task.project_id))
         const publishing = active.filter(project => (project.actual_publication_date ?? project.target_publication_date) === key)
         const dayMinutes = (until - from) / 60000
         const rowHeight = 55 * dayMinutes / 1440
@@ -113,13 +137,13 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, res
           laneEnds[lane] = end
           return { block, start, end, lane }
         })
-        const renderBlock = (block: Block) => {
+        const renderBlock = (block: CalendarBlock) => {
           const task = snapshot.tasks.find(item => item.id === block.task_id)
           const project = snapshot.projects.find(item => item.id === block.project_id)
-          const color = skills.find(skill => skill.id === task?.skill_id)?.color ?? '#7184C4'
+          const color = phaseColor(block.project_id,block.task_id)
           return <button key={block.id} className={`calendar-event event-${block.status}`} style={{ borderInlineStartColor: color }}
-            draggable={!busy} onDragStart={event=>{event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('application/creator-block',block.id)}} onClick={() => edit(block)}>
-            <small>{time.format(Math.max(from, Date.parse(block.starts_at)))}–{time.format(Math.min(until, Date.parse(block.ends_at)))}{block.status !== 'planned' && ` · ${block.status}`}</small>
+            draggable={!busy} onDragStart={event=>{event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('application/creator-block',block.id)}} onClick={() => block.daily ? editDay(block.daily) : edit(block)}>
+            <small>{time.format(block.daily ? Date.parse(block.starts_at) : Math.max(from, Date.parse(block.starts_at)))}–{time.format(block.daily ? Date.parse(block.ends_at) : Math.min(until, Date.parse(block.ends_at)))}{block.status !== 'planned' && ` · ${block.status}`}</small>
             <strong>{task?.title ?? project?.name ?? 'Work block'}</strong>{task && <small>{project?.name}{task.status==='done'?' · Task done':''}</small>}
           </button>
         }
@@ -129,10 +153,18 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, res
           <header><div><small>{dateLabel(day, { weekday: 'short' })}</small><strong>{day.day}</strong></div>
             <button className="icon-button" aria-label={`Schedule work on ${key}`} onClick={() => add(key)}><Plus size={16} /></button>
           </header>
-          {publishing.map(project => <button key={project.id} className="calendar-event calendar-marker" onClick={() => openProject(project.id)}>
+          {publishing.map(project => <button key={project.id} className="calendar-event calendar-marker" style={{ borderInlineStartColor: workflow[project.actual_publication_date ? 'published' : 'preparing'].color }} onClick={() => openProject(project.id)}>
             <small>{project.actual_publication_date ? 'Published' : 'Publish target'}</small><strong>{project.name}</strong></button>)}
-          {due.map(task => <button key={task.id} className="calendar-event calendar-marker" onClick={() => openProject(task.project_id)}>
+          {due.map(task => <button key={task.id} className="calendar-event calendar-marker" style={{ borderInlineStartColor: phaseColor(task.project_id,task.id) }} onClick={() => openProject(task.project_id)}>
             <small>Task due</small><strong>{task.title}</strong></button>)}
+          {entries.filter(entry => !entry.starts_at).map(entry => {
+            const task = snapshot.tasks.find(item => item.id === entry.task_id)
+            const project = active.find(item => item.id === entry.project_id)
+            return <button key={dailyId(entry)} className="calendar-event calendar-all-day" onClick={() => editDay(entry)}
+              style={{ borderInlineStartColor: phaseColor(entry.project_id,entry.task_id) }}>
+              <small>All day{task?.status === 'done' ? ' · Done' : ''}</small><strong>{task?.title}</strong><small>{project?.name}</small>
+            </button>
+          })}
           {timeline && !todayOnly ? <div className="calendar-hours" style={{ minHeight: `${rowHeight}rem` }} onDrop={event=>drop(event,key,from,until)}>
             {Array.from({ length: Math.ceil(dayMinutes / 180) }, (_, index) => <div className="calendar-hour" key={index}
               style={{ top: `${index * 18000 / dayMinutes}%` }}><small>{time.format(from + index * 10800000)}</small></div>)}
@@ -150,16 +182,85 @@ export function Planner({ snapshot, todayOnly, edit, add, openProject, busy, res
                     if(!resize.current)return
                     const row=event.currentTarget.closest<HTMLElement>('.calendar-hours')
                     if(row)setResizeGuide({id:block.id,edge,minutes:resizeMinutes(event,row,dayMinutes)})
-                  }} onPointerUp={event=>finishResize(event,block,dayMinutes)}
+                  }} onPointerUp={event=>finishResize(event,block,dayMinutes,from,until)}
                   onPointerCancel={()=>{resize.current=null;setResizeGuide(undefined)}}/>)}
               </div>
             })}
           </div> : blocks.map(renderBlock)}
-          {!timeline && !blocks.length && !publishing.length && !due.length && <small className="calendar-empty">No work scheduled</small>}
+          {!timeline && !blocks.length && !entries.length && !publishing.length && !due.length && <small className="calendar-empty">No work scheduled</small>}
         </article>
       })}
     </div>
   </section>
+}
+
+function dayClock(instant: string, zone: string) {
+  return localInput(instant, zone).slice(11)
+}
+
+export function CalendarDayEditor({ entry, snapshot, busy, error, close, save }: EditorProps & {
+  entry: CalendarDay; snapshot: Snapshot
+}) {
+  const zone = entry.timezone ?? snapshot.profile.timezone
+  const [start,setStart] = useState(entry.starts_at ? dayClock(entry.starts_at,zone) : '09:00')
+  const [end,setEnd] = useState(entry.ends_at ? dayClock(entry.ends_at,zone) : '09:30')
+  const [failure,setFailure] = useState('')
+  const [durationInput,setDurationInput] = useState<string>()
+  const task = snapshot.tasks.find(item => item.id === entry.task_id)
+  const day = Temporal.PlainDate.from(entry.day)
+  const nextDay = day.add({days:1}).toString()
+  function instant(clock: string, endTime = false) {
+    return localInstant(`${endTime && clock === '00:00' ? nextDay : entry.day}T${clock}`,zone)
+  }
+  const args = { p_task: entry.task_id, p_day: entry.day }
+  let duration = ''
+  try {
+    const difference = (Date.parse(instant(end,true)) - Date.parse(instant(start))) / 60000
+    if (difference > 0) duration = String(difference)
+  } catch { /* The form reports invalid or ambiguous times when submitted. */ }
+  function durationEnd(value: string) {
+    const minutes = Number(value)
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1500) throw new RangeError()
+    const target = Temporal.Instant.from(instant(start)).add({minutes}).toZonedDateTimeISO(zone)
+    if (target.toPlainDate().toString() !== entry.day && !(target.toPlainDate().toString() === nextDay && target.hour === 0 && target.minute === 0)) {
+      throw new RangeError()
+    }
+    return target
+  }
+  return <StudioDialog title={task?.title ?? 'Daily task'} description={`${entry.day} · ${zone}. These times apply to this day.`}
+    close={() => {if (!busy) close()}}>
+    <form className="form" onSubmit={event => {
+      event.preventDefault()
+      try {
+        const p_start = entry.starts_at && start === dayClock(entry.starts_at,zone) ? entry.starts_at : instant(start)
+        const p_end = durationInput !== undefined ? durationEnd(durationInput).toInstant().toString()
+          : entry.ends_at && end === dayClock(entry.ends_at,zone) ? entry.ends_at : instant(end,true)
+        if (Date.parse(p_end) <= Date.parse(p_start)) {setFailure('The end must be after the start.');return}
+        save({...args,p_start,p_end,p_timezone:zone})
+      } catch {setFailure('Choose valid local times within this day.')}
+    }}>
+      <div className="form-grid">
+        <label>Start time<input required type="time" value={start} onChange={event => {setStart(event.target.value);setDurationInput(undefined)}}/></label>
+        <label>End time<input required type="time" value={end} onChange={event => {setEnd(event.target.value);setDurationInput(undefined)}}/></label>
+      </div>
+      <label>Duration (minutes)<input type="number" min={1} max={1500} value={durationInput ?? duration}
+        onChange={event => setDurationInput(event.target.value)} onBlur={() => {
+          if (durationInput === undefined) return
+          try {
+            const target = durationEnd(durationInput)
+            setEnd(target.toPlainTime().toString({smallestUnit:'minute'}))
+            setDurationInput(undefined)
+            setFailure('')
+          } catch {setFailure('Choose a duration that ends within this day.')}
+        }}/></label>
+      {(failure||error) && <p className="form-error" role="alert">{failure||error}</p>}
+      <div className="form-actions">
+        {entry.starts_at && <button type="button" className="text-button push" disabled={busy}
+          onClick={() => save({...args,p_start:null,p_end:null,p_timezone:null})}>Set all day</button>}
+        <button className="button primary" disabled={busy}>Save time</button>
+      </div>
+    </form>
+  </StudioDialog>
 }
 
 export function BlockEditor({ snapshot, block, duplicate, copy, day, projectId, taskId, busy, error, close, save }: EditorProps & {
@@ -236,7 +337,7 @@ export function TemplateEditor({ template, kind, busy, error, close, save }: Edi
       })) }))
       const details = kind === 'quest' || kind === 'task' ? {
         skill: data.get('skill'), ...(data.get('minutes') ? { minutes: Number(data.get('minutes')) } : {}),
-        ...(data.get('bonus') ? { bonus: Number(data.get('bonus')) } : {}),
+        ...(template?.details.bonus !== undefined ? { bonus: template.details.bonus } : {}),
       } : kind === 'stage' ? { tasks: stageDetails[0].tasks }
         : { content_type: data.get('type'), stages: stageDetails }
       save({ p_id: id, p_kind: kind, p_name: data.get('name'), p_details: details })
@@ -245,7 +346,6 @@ export function TemplateEditor({ template, kind, busy, error, close, save }: Edi
       {kind === 'quest' || kind === 'task' ? <>
         <label>Skill<select name="skill" defaultValue={template?.details.skill ?? 'editing'}>{skills.map(skill => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select></label>
         <label>{kind === 'quest' ? 'Timer minutes (leave blank for a completion milestone)' : 'Estimated minutes'}<input name="minutes" type="number" min={1} max={1440} defaultValue={template?.details.minutes ?? (template ? '' : 25)} /></label>
-        {(kind === 'quest' || kind === 'task') && <label>{kind === 'quest' ? 'Milestone completion XP' : 'Completion XP'}<input name="bonus" type="number" min={0} max={10000} defaultValue={template?.details.bonus ?? (kind === 'quest' ? 10 : '')} /></label>}
       </> : <>
         {kind === 'project' && <label>Content type<input name="type" required maxLength={80} defaultValue={template?.details.content_type ?? 'Video'} /></label>}
         {stages.map((stage, stageIndex) => <fieldset key={stage.key} className="form preset-stage">
@@ -269,9 +369,6 @@ export function TemplateEditor({ template, kind, busy, error, close, save }: Edi
                 {skills.map(skill => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select></label>
               <label>Estimated minutes<input type="number" min={1} max={1440} value={task.minutes ?? ''} onChange={event => patchTask(stage.key, task.key, { minutes: event.target.value ? Number(event.target.value) : undefined })} /></label>
             </div>
-            <label>Completion XP<input type="number" min={0} max={10000} value={task.bonus ?? ''} onChange={event => patchTask(stage.key, task.key, {
-              bonus: event.target.value ? Number(event.target.value) : undefined,
-            })} /></label>
             <div className="actions">
               {([-1,1] as const).map(direction => <button key={direction} type="button" className="icon-button"
                 aria-label={`Move task ${direction===-1?'up':'down'}`} disabled={taskIndex+direction<0 || taskIndex+direction>=stage.tasks.length}
@@ -319,16 +416,15 @@ export function Insights({ snapshot }: { snapshot: Snapshot }) {
   const rows = days.map(day => ({
     day,
     minutes: snapshot.sessions.filter(session => localInput(session.started_at, zone).startsWith(day.toString())).reduce((sum, session) => sum + session.minutes, 0),
-    xp: snapshot.ledger.filter(award => localInput(award.earned_at, zone).startsWith(day.toString())).reduce((sum, award) => sum + award.xp, 0),
   }))
   const max = Math.max(1, ...rows.map(row => row.minutes))
   return <section className="panel"><div className="panel-heading"><h2>Last seven days</h2></div>
     <div className="insight-totals"><div><strong>{rows.reduce((sum, row) => sum + row.minutes, 0)}</strong> minutes logged</div>
-      <div><strong>{rows.reduce((sum, row) => sum + row.xp, 0)}</strong> XP earned</div></div>
-    <ul className="insight-chart" aria-label="Daily work minutes and XP">{rows.map(row => <li key={row.day.toString()}>
+      </div>
+    <ul className="insight-chart" aria-label="Daily work minutes">{rows.map(row => <li key={row.day.toString()}>
       <span>{dateLabel(row.day, { weekday: 'short' })}</span>
       <span className="insight-track"><span style={{ width: `${100 * row.minutes / max}%` }} /></span>
-      <small>{row.minutes} min · {row.xp} XP</small>
+      <small>{row.minutes} min</small>
     </li>)}</ul>
   </section>
 }

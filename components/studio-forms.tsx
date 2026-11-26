@@ -2,16 +2,15 @@
 
 import { useState, type FormEvent } from 'react'
 import { Temporal } from '@js-temporal/polyfill'
-import { Sparkles } from 'lucide-react'
 import { currentDay } from '@/components/planner'
 import { StudioDialog } from '@/components/ui/dialog'
-import { localInput, rpc, skills, type PlanPhase, type Project, type SessionDraft, type Snapshot, type Task, type Topic, type WorkSession } from '@/lib/studio'
+import { localInput, rpc, skills, workflow, workflowKeys, type PlanPhase, type Project, type SessionDraft, type Snapshot, type Task, type Topic, type WorkSession } from '@/lib/studio'
 
 type Args = Record<string, unknown>
 type Editor = { busy: boolean; error: string; close: () => void }
 
 function SkillField({ initial, value, onChange }: { initial?: string; value?: string; onChange?: (value: string) => void }) {
-  return <label>Skill<select name="skill" defaultValue={value === undefined ? initial ?? skills[0].id : undefined}
+  return <label>Activity<select name="skill" defaultValue={value === undefined ? initial ?? skills[0].id : undefined}
     value={value} onChange={onChange ? event => onChange(event.target.value) : undefined}>
     {skills.map(skill => <option key={skill.id} value={skill.id}>{skill.name}</option>)}
   </select></label>
@@ -22,10 +21,10 @@ export function ProjectEditor({ snapshot, project, topic, busy, error, close, sa
 }) {
   const [id] = useState(() => project?.id ?? crypto.randomUUID())
   const templates = snapshot.templates.filter(item => item.kind === 'project')
-  const starter = templates.find(item => topic?.content_type !== 'Video' && item.details.content_type === topic?.content_type && topic)
-    ?? templates.find(item => item.name === 'Long-form video') ?? templates[0]
+  const starter = templates.find(item => item.name === 'Studio workflow') ?? templates[0]
   const [templateId, setTemplateId] = useState(starter?.id ?? '')
-  const [contentType, setContentType] = useState(project?.content_type ?? topic?.content_type ?? starter?.details.content_type ?? 'Video')
+  const [contentType, setContentType] = useState(project?.content_type ??
+    (topic?.content_type && topic.content_type !== 'Video' ? topic.content_type : starter?.details.content_type ?? 'Long-form video'))
   const [start, setStart] = useState(project?.start_date ?? currentDay(snapshot.profile.timezone).toString())
   const [auto, setAuto] = useState(true)
   const [simple, setSimple] = useState(false)
@@ -56,7 +55,7 @@ export function ProjectEditor({ snapshot, project, topic, busy, error, close, sa
       const data = new FormData(event.currentTarget)
       if (topic && !preview) { void showPreview(); return }
       const args = { p_id: id, p_name: data.get('name'), p_description: data.get('description'), p_start: start,
-        p_meta: { type: data.get('type'), stage: data.get('stage') || null, priority: Number(data.get('priority')),
+        p_meta: { type: data.get('type'), stage: project?.production_stage_id ?? null, workflow: data.get('workflow'), priority: Number(data.get('priority')),
           status: data.get('status'), target: data.get('target') || null, actual: data.get('actual') || null,
           notes: data.get('notes'), script: data.get('script'), cover: data.get('cover') } }
       save(project ? { ...args, p_archived: data.has('archived') } : { ...args, ...plan, p_topic: topic?.id ?? null }, id)
@@ -92,7 +91,7 @@ export function ProjectEditor({ snapshot, project, topic, busy, error, close, sa
           {preview && <section className="plan-preview" aria-label="Generated workflow">
             {preview.map((phase, index) => <details key={index} open={index === 0}>
               <summary>{phase.name} · {phase.tasks.length} tasks{phase.start && ` · ${phase.start} – ${phase.end}`}</summary>
-              <ul>{phase.tasks.map((task, n) => <li key={n}>{task.title} · {task.bonus} XP{task.start && ` · ${task.start} – ${task.end}`}</li>)}</ul>
+              <ul>{phase.tasks.map((task, n) => <li key={n}>{task.title}{task.start && ` · ${task.start} – ${task.end}`}</li>)}</ul>
             </details>)}
           </section>}
           {previewError && <p className="form-error" role="alert">{previewError}</p>}
@@ -100,10 +99,12 @@ export function ProjectEditor({ snapshot, project, topic, busy, error, close, sa
       </>}
       <details className="project-edit-metadata" open={Boolean(project) || undefined}><summary>Project details</summary>
       <div className="form-grid">
-        <label>Content type<input name="type" required maxLength={80} value={contentType} onChange={event => setContentType(event.target.value)} /></label>
-        <label>Production stage<select name="stage" defaultValue={project?.production_stage_id ?? ''}><option value="">No stage</option>{snapshot.stages.filter(stage => stage.project_id === project?.id).map(stage => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></label>
+        <label>Content type<input name="type" list="project-content-types" required maxLength={80} value={contentType} onChange={event => setContentType(event.target.value)} /></label>
+        <datalist id="project-content-types"><option value="Long-form video"/><option value="Short-form video"/><option value="Short-form clip"/></datalist>
+        {project && <label>Production stage<select name="workflow" defaultValue={project.workflow_stage}>{workflowKeys.map(key =>
+          <option key={key} value={key}>{workflow[key].name}</option>)}</select></label>}
         <label>Priority<select name="priority" defaultValue={project?.priority ?? 2}><option value={1}>High</option><option value={2}>Medium</option><option value={3}>Low</option></select></label>
-        <label>Status<select name="status" defaultValue={project?.status ?? 'active'}><option value="planned">Planned</option><option value="active">Active</option><option value="paused">Paused</option><option value="published">Published</option></select></label>
+        <label>Status<select name="status" defaultValue={project?.status === 'published' ? 'active' : project?.status ?? 'active'}><option value="planned">Planned</option><option value="active">Active</option><option value="paused">Paused</option></select></label>
         <label>Target publication<input name="target" type="date" defaultValue={project?.target_publication_date ?? ''} /></label>
         <label>Actual publication<input name="actual" type="date" defaultValue={project?.actual_publication_date ?? ''} /></label>
       </div>
@@ -131,8 +132,8 @@ export function WorkingDays({ days, change }: { days: number[]; change: (value: 
   </fieldset>
 }
 
-export function TaskEditor({ snapshot, project, task, initialStatus, defaultBonus, busy, error, close, save, action }: Editor & {
-  snapshot: Snapshot; project: Project; task?: Task; initialStatus?: Task['status']; defaultBonus: number; save: (args: Args) => void; action: (task: Task, action: 'duplicate' | 'delete') => void
+export function TaskEditor({ snapshot, project, task, initialStatus, busy, error, close, save, action }: Editor & {
+  snapshot: Snapshot; project: Project; task?: Task; initialStatus?: Task['status']; save: (args: Args) => void; action: (task: Task, action: 'duplicate' | 'delete') => void
 }) {
   const [id] = useState(() => task?.id ?? crypto.randomUUID())
   return <StudioDialog title={task ? 'Edit task' : 'New task'} description={project.name} close={() => { if (!busy) close() }}>
@@ -140,7 +141,7 @@ export function TaskEditor({ snapshot, project, task, initialStatus, defaultBonu
       event.preventDefault()
       const data = new FormData(event.currentTarget)
       save({ p_id: id, p_project: project.id, p_title: data.get('title'), p_skill: data.get('skill'),
-        p_status: data.get('status'), p_priority: Number(data.get('priority')), p_bonus: Number(data.get('bonus')),
+        p_status: data.get('status'), p_priority: Number(data.get('priority')), p_bonus: task?.bonus ?? 0,
         p_meta: { description: data.get('description'), parent: data.get('parent') || null,
           stage: data.get('stage') || null, dependency: data.get('dependency') || null, due: data.get('due') || null, minutes: data.get('minutes') || null } })
     }}>
@@ -156,9 +157,8 @@ export function TaskEditor({ snapshot, project, task, initialStatus, defaultBonu
           <option value={1}>High</option><option value={2}>Medium</option><option value={3}>Low</option>
         </select></label>
         <label>Status<select name="status" defaultValue={task?.status ?? initialStatus ?? 'todo'}>
-          <option value="todo">To do</option><option value="doing">In progress</option><option value="blocked">Blocked</option><option value="done">Done</option>
+          <option value="todo">To do</option><option value="doing">In progress</option><option value="done">Done</option>
         </select></label>
-        <label>Completion XP<input name="bonus" type="number" min={0} max={10000} step={1} required defaultValue={task?.bonus ?? defaultBonus} /></label>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="form-actions">
@@ -179,18 +179,14 @@ export function SessionEditor({ snapshot, session, draft, busy, error, close, sa
   const [project, setProject] = useState(session ? session.project_id ?? '' : draft?.project ?? available[0]?.id ?? '')
   const [task, setTask] = useState(session?.task_id ?? draft?.task ?? '')
   const [skill, setSkill] = useState<string>(session?.skill_id ?? draft?.skill ?? skills[0].id)
-  const [preview, setPreview] = useState<{ args: Args; xp: number }>()
-  const [pending, setPending] = useState(false)
   const [failure, setFailure] = useState('')
   const timezone = session?.timezone ?? snapshot.profile.timezone
   const sourceTime = session?.started_at ?? draft?.started
   const [defaultStart] = useState(() => localInput(sourceTime ?? new Date().toISOString(), timezone))
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
+  function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (preview) { save(preview.args); return }
     const data = new FormData(event.currentTarget)
-    setPending(true)
     setFailure('')
     try {
       const entered = String(data.get('started'))
@@ -203,18 +199,17 @@ export function SessionEditor({ snapshot, session, draft, busy, error, close, sa
       const args = { p_id: id, p_project: project || null, p_task: task || null, p_skill: skill, p_started: start,
         p_minutes: minutes, p_method: session?.entry_method ?? draft?.method ?? (draft ? 'timer' : 'manual'),
         p_notes: data.get('notes'), p_ended: unchangedTiming ? originalEnd ?? null : null }
-      const xp = await rpc<number>('studio_log_session', { ...args, p_preview: true })
-      setPreview({ args, xp })
+      save(args)
     } catch (exception) {
       setFailure(exception instanceof RangeError ? 'Choose an unambiguous local start time outside the daylight-saving transition.' : (exception as Error).message)
-    } finally { setPending(false) }
+    }
   }
 
   return <StudioDialog title={session ? 'Edit work session' : 'Log work session'}
-    description={`Session times use ${timezone}. Preview XP before saving.`}
+    description={`Session times use ${timezone}.`}
     close={() => { if (!busy) close() }}>
-    <form className="form" onSubmit={submit} onChange={() => { setPreview(undefined); setFailure('') }}>
-      <fieldset disabled={busy || pending} className="form">
+    <form className="form" onSubmit={submit} onChange={() => setFailure('')}>
+      <fieldset disabled={busy} className="form">
         <label>Project<select name="project" value={project} onChange={event => { setProject(event.target.value); setTask('') }}>
           <option value="">No project</option>
           {available.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
@@ -237,16 +232,12 @@ export function SessionEditor({ snapshot, session, draft, busy, error, close, sa
         </div>
       </fieldset>
       {draft?.minutes === 0 && draft.method !== 'manual' && <p className="muted">The timer ran for less than a minute. Enter a duration if you have additional work to log.</p>}
-      {preview && <div className="preview-xp" role="status"><Sparkles size={19} /><div>
-        <strong>+{preview.xp} Creator XP · +{preview.xp} {skills.find(item => item.id === skill)?.name} XP</strong>
-        <p>Earlier sessions use the daily cap first. Changes can update later awards.</p>
-      </div></div>}
       {(failure || error) && <p className="form-error" role="alert">{failure || error}</p>}
       <div className="form-actions">
         {session && <button type="button" className="text-button danger-text push" disabled={busy} onClick={() => remove(session)}>Delete session</button>}
         <button type="button" className="button secondary" disabled={busy} onClick={close}>Cancel</button>
-        <button className="button primary" disabled={busy || pending}>
-          {busy ? 'Saving…' : pending ? 'Calculating…' : preview ? 'Save session' : 'Preview XP'}
+        <button className="button primary" disabled={busy}>
+          {busy ? 'Saving…' : 'Save session'}
         </button>
       </div>
     </form>

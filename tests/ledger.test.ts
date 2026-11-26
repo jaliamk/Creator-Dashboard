@@ -203,3 +203,48 @@ it('converts an idea into an owned schedule and synchronizes board completion wi
   expect((await db.query('select id from public.topics')).rows).toEqual([])
   await expect(db.query('select public.studio_board_task($1,$2,$3)',[c,found,'todo'])).rejects.toThrow()
 })
+
+it('synchronizes daily scheduling while retaining sessions and published statistics', async () => {
+  await log(a, '2026-11-26T17:00:00Z', 42)
+  await db.exec('reset role')
+  for (const [table, migration] of [
+    ['work_blocks','20261122000100_planner.sql'],
+    ['topics','20261122000200_project_centric.sql'],
+  ]) {
+    const result = await db.query<{ exists: boolean }>("select to_regclass($1) is not null as exists",[`public.${table}`])
+    if (!result.rows[0].exists) await db.exec(readFileSync(new URL(`../supabase/migrations/${migration}`,import.meta.url),'utf8'))
+  }
+  await login(owner)
+  await setTask('blocked',12)
+  await db.exec('reset role')
+  await db.exec(readFileSync(new URL('../supabase/migrations/20261126000000_workflow.sql',import.meta.url),'utf8'))
+  await login(owner)
+  expect((await db.query('select status from public.tasks where id=$1',[task])).rows).toEqual([{status:'doing'}])
+  expect((await ledger()).find(award => award.source_id===a)?.xp).toBe(42)
+  await db.query('select public.studio_journey_snapshot()')
+  const template = (await db.query<{ id: string }>("select id from public.planner_templates where name='Studio workflow'")).rows[0].id
+  const meta = {type:'Short-form video',priority:2,status:'active',notes:'',script:''}
+  await db.query('select public.studio_create_production($1,$2,$3,$4,$5,$6,$7,$8)',[c,'Short film','',meta,template,'2026-11-26',true,false])
+  expect((await db.query('select id from public.tasks where project_id=$1',[c])).rows).toHaveLength(5)
+  const edit = (await db.query<{ id: string; start: string; stop: string }>("select id,planned_start::text as start,planned_end::text as stop from public.tasks where project_id=$1 and title='Editing'",[c])).rows[0]
+  const schedule = (start: string,end: string,oldStart: string,oldEnd: string) =>
+    db.query("select public.studio_schedule_span($1,'task',$2,$3,$4,$5,$6)",[c,edit.id,start,end,oldStart,oldEnd])
+  await schedule('2026-11-28','2026-11-29',edit.start,edit.stop)
+  await db.query("select public.studio_time_task_day($1,'2026-11-29','2026-11-29T14:00:00Z','2026-11-29T15:00:00Z','America/New_York')",[edit.id])
+  await expect(db.query("select public.studio_time_task_day($1,'2026-11-29','2026-11-30T14:00:00Z','2026-11-30T15:00:00Z','America/New_York')",[edit.id])).rejects.toThrow('within this calendar day')
+  await schedule('2026-11-29','2026-11-30','2026-11-28','2026-11-29')
+  const entries = await db.query('select day::text,starts_at is not null as timed from public.task_calendar_days where task_id=$1 order by day',[edit.id])
+  expect(entries.rows).toEqual([{day:'2026-11-29',timed:true},{day:'2026-11-30',timed:false}])
+  await db.query("select public.studio_block($1,$2,$3,'2026-11-29T16:00:00Z','2026-11-29T17:00:00Z','America/New_York','','planned')",[b,c,edit.id])
+  for (const stage of ['published','editing','published']) await db.query('select public.studio_move_project($1,$2)',[c,stage])
+  await db.query("select public.studio_move_project($1,'published')",[project])
+  await db.query('select public.studio_archive_project($1,true)',[c])
+  expect((await db.query('select archived from public.projects where id=$1',[c])).rows).toEqual([{archived:true}])
+  expect((await db.query('select count(*)::integer from public.task_calendar_days where task_id=$1',[edit.id])).rows).toEqual([{count:2}])
+  await db.query('select public.studio_delete_project_keep_history($1)',[c])
+  await db.query('select public.studio_delete_project_keep_history($1)',[project])
+  expect((await db.query('select id from public.work_blocks')).rows).toEqual([])
+  expect((await db.query('select day from public.task_calendar_days')).rows).toEqual([])
+  expect((await db.query('select id,project_id,minutes from public.work_sessions where id=$1',[a])).rows).toEqual([{id:a,project_id:null,minutes:42}])
+  expect((await db.query('select format from public.publications order by format')).rows).toEqual([{format:'long'},{format:'short'}])
+})

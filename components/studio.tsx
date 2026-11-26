@@ -8,13 +8,13 @@ import {
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { StudioDialog } from '@/components/ui/dialog'
-import { progression } from '@/lib/progression'
-import { initial, rpc, skills, supabase, type Block, type Project, type SessionDraft, type Snapshot, type Task, type Template, type Theme, type Topic, type WorkSession } from '@/lib/studio'
-import { BlockEditor, Insights, Planner, TemplateEditor } from '@/components/planner'
+import { initial, rpc, skills, stageKey, workflow, supabase, type Block, type CalendarDay, type Project, type SessionDraft, type Snapshot, type Task, type Template, type Theme, type Topic, type WorkSession, type WorkflowStage } from '@/lib/studio'
+import { BlockEditor, CalendarDayEditor, Insights, Planner, TemplateEditor } from '@/components/planner'
 import { ProjectEditor, SessionEditor, TaskEditor, WorkingDays } from '@/components/studio-forms'
 
-import { Portfolio, ProductionBoard, nextTask } from '@/components/production-board'
+import { Portfolio, ProductionBoard, ProjectOptions, nextTask } from '@/components/production-board'
 import { ProductionTimeline, SpanEditor, type SpanItem } from '@/components/production-timeline'
+import { CreatorJourney } from '@/components/creator-journey'
 import { TopicBank, TopicEditor, TopicLink } from '@/components/topic-bank'
 
 const navigation = [
@@ -22,7 +22,7 @@ const navigation = [
   { name: 'Projects', icon: FolderOpen },
   { name: 'Timeline', icon: ChartGantt },
   { name: 'Calendar', icon: CalendarDays },
-  { name: 'Progression', icon: Sparkles },
+  { name: 'Creator Journey', icon: Sparkles },
   { name: 'Today', icon: ListTodo },
   { name: 'Quick Quests', icon: Timer },
   { name: 'Insights', icon: Activity },
@@ -31,6 +31,7 @@ const navigation = [
 type View = typeof navigation[number]['name']
 type Modal =
   | { kind: 'auth' }
+  | { kind: 'calendar-day'; day: CalendarDay }
   | { kind: 'topic'; topic?: Topic }
   | { kind: 'link'; topic: Topic }
   | { kind: 'span'; item: SpanItem }
@@ -44,12 +45,6 @@ type Modal =
 const priority: Record<number, string> = { 1: 'High', 2: 'Medium', 3: 'Low' }
 const milestoneTitle = (value:string) => value.trim().toLowerCase().replace(/(^|\s)the\s+/g,'$1')
 const skillName = (id: string) => skills.find(skill => skill.id === id)?.name ?? id
-
-function ProgressBar({ value, label }: { value: number; label: string }) {
-  return <div className="progress" role="progressbar" aria-label={label} aria-valuenow={Math.round(value)} aria-valuemin={0} aria-valuemax={100}>
-    <span style={{ width: `${value}%` }} />
-  </div>
-}
 
 function Empty({ icon: Icon, title, children }: { icon: typeof Clock3; title: string; children: React.ReactNode }) {
   return <div className="empty"><span className="empty-icon"><Icon size={19} /></span><div><strong>{title}</strong><p>{children}</p></div></div>
@@ -88,7 +83,10 @@ export function Studio() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       const nextUser = session?.user ?? null
       const nextOwner = nextUser?.id ?? null
-      if (currentOwner.current === nextOwner) { setLoading(false); return }
+      if (currentOwner.current === nextOwner) {
+        if (!nextOwner) setLoading(false)
+        return
+      }
       currentOwner.current = nextOwner
       const request = ++loadSequence.current
       clearTimeout(reload)
@@ -108,7 +106,7 @@ export function Studio() {
       if (!nextUser) { setLoading(false); return }
       setLoading(true)
       reload = setTimeout(() => {
-        rpc<Snapshot>('studio_production_snapshot', { p_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }).then(data => {
+        rpc<Snapshot>('studio_journey_snapshot', { p_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }).then(data => {
           if (active && request === loadSequence.current) setSnapshot(data)
         }).catch((failure: Error) => {
           if (active && request === loadSequence.current) setError(failure.message)
@@ -152,7 +150,7 @@ export function Studio() {
     try {
       await work()
       if (owner !== currentOwner.current) return
-      const data = await rpc<Snapshot>('studio_production_snapshot')
+      const data = await rpc<Snapshot>('studio_journey_snapshot')
       if (owner !== currentOwner.current) return
       setSnapshot(data)
       setModal(undefined)
@@ -171,8 +169,7 @@ export function Studio() {
 
   function updateTask(task: Task, state: Task['status'], before?: string) {
     const message = state === task.status ? 'Task order saved.' : state === 'done'
-      ? `Task completed. +${task.bonus} Creator XP and +${task.bonus} ${skillName(task.skill_id)} XP.`
-      : task.status === 'done' ? 'Task reopened. Its completion XP was reversed.' : 'Task status updated.'
+      ? 'Task completed.' : task.status === 'done' ? 'Task reopened.' : 'Task status updated.'
     void mutate(() => rpc('studio_board_task', { p_project: task.project_id, p_task: task.id, p_status: state, p_before: before ?? null }), message)
   }
 
@@ -202,6 +199,26 @@ export function Studio() {
       ? remember('studio_block',blockArgs(previous)) : remember('studio_remove_block',{p_id:args.p_id}))
   }
 
+  function saveDay(entry: CalendarDay, args: Record<string, unknown>) {
+    void mutate(() => rpc('studio_time_task_day',args), 'Calendar time saved.', () => remember('studio_time_task_day', {
+      p_task: entry.task_id, p_day: entry.day, p_start: entry.starts_at, p_end: entry.ends_at, p_timezone: entry.timezone,
+    }))
+  }
+
+  function editProject(project: Project) { open({kind:'project',project}) }
+
+  function archiveProject(project: Project) {
+    void mutate(() => rpc('studio_archive_project',{p_id:project.id,p_archived:!project.archived}),
+      project.archived?'Project restored.':'Project archived.')
+  }
+
+  function removeProject(project: Project) { open({kind:'delete',project}) }
+
+  function moveProject(project: Project, stage: WorkflowStage) {
+    void mutate(() => rpc('studio_move_project',{p_id:project.id,p_stage:stage}),
+      stage==='published'?'Project marked published.':'Project stage updated.')
+  }
+
   function stopTimer() {
     if (timerStart === undefined) return
     const end = Date.now()
@@ -218,9 +235,7 @@ export function Studio() {
   const selected = snapshot.projects.find(project => project.id === projectId)
   const projectById = new Map(snapshot.projects.map(project => [project.id, project]))
   const recommendedSkill = nextTask(snapshot.tasks.filter(task=>task.project_id===questProject))?.skill_id
-  const queue = snapshot.tasks.filter(task => task.status !== 'done' && !projectById.get(task.project_id)?.archived)
-  const total = snapshot.ledger.reduce((sum, entry) => sum + entry.xp, 0)
-  const creator = progression(total, snapshot.profile.creator_factor)
+  const queue = snapshot.tasks.filter(task => task.status !== 'done' && !projectById.get(task.project_id)?.archived && projectById.get(task.project_id)?.workflow_stage !== 'published')
   const activity = [
     ...snapshot.sessions.map(session => ({
       id: session.id, date: session.started_at, title: `${session.minutes} min · ${skillName(session.skill_id)}`,
@@ -247,7 +262,8 @@ export function Studio() {
   }
 
   function renderTask(task:Task) {
-    return <div className="list-row" key={task.id}>
+    const phase = snapshot.stages.find(stage => stage.id === task.stage_id)
+    return <div className="list-row staged-row" key={task.id} style={{ '--stage': workflow[stageKey(phase?.name,task.skill_id)].color } as CSSProperties}>
       <button className={`check-button ${task.status==='done'?'checked':''}`} disabled={busy}
         aria-label={`${task.status==='done'?'Reopen':'Complete'} ${task.title}`}
         onClick={()=>updateTask(task,task.status==='done'?'todo':'done')}><Check size={15}/></button>
@@ -268,13 +284,13 @@ export function Studio() {
     const tasks = snapshot.tasks.filter(task => task.project_id === project.id)
     return <button key={project.id} className="project-row" onClick={() => showProject(project)}>
       <span className="project-icon"><FolderOpen size={20} /></span>
-      <span className="row-copy"><strong>{project.name}</strong><small>{project.archived ? 'Archived' : project.status} · {project.content_type} · {snapshot.stages.find(stage => stage.id === project.production_stage_id)?.name ?? 'Unstaged'} · {tasks.filter(task => task.status === 'done').length}/{tasks.length} tasks complete</small></span>
+      <span className="row-copy"><strong>{project.name}</strong><small>{project.archived ? 'Archived' : project.status} · {project.content_type} · {workflow[project.workflow_stage].name} · {tasks.filter(task => task.status === 'done').length}/{tasks.length} tasks complete</small></span>
       <ChevronRight size={17} className="muted" />
     </button>
   }
 
   const logButton = <button className="button secondary" onClick={() => {setTimerDraft(undefined);open({ kind: 'session' })}}><Clock3 size={17} /> Log time</button>
-  const newButton = <button className="button primary" onClick={() => open({ kind: 'project' })}><Plus size={18} /> New project</button>
+  const newButton = <button className="button primary" disabled={loading} onClick={() => open({ kind: 'project' })}><Plus size={18} /> New project</button>
   const timerButton = <button className={`button ${timerStart === undefined ? 'secondary' : 'primary'}`} onClick={() => {
     if (!user) { open({ kind: 'auth' }); return }
     if (timerStart !== undefined) { stopTimer(); return }
@@ -308,7 +324,6 @@ export function Studio() {
 
     <main className="workspace">
       <div className="topline"><span>Workspace</span><ChevronRight size={14} /><strong>{view}</strong>
-        <button className="header-xp" onClick={() => { setView('Progression'); setProjectId(undefined) }}><Sparkles size={15} /> Lv. {creator.level} · {total.toLocaleString()} XP</button>
       </div>
       <header className="page-header">
         <div>
@@ -321,8 +336,8 @@ export function Studio() {
             Projects: selected?.description || 'Manage content projects from idea to publication.',
             Today: 'See what’s on the calendar and what to do next.',
             'Quick Quests': 'Start a focused session or check off a production milestone.',
-            Progression: 'See how your creative work builds skill and experience.',
-            Insights: 'Review activity, XP trends, and logged sessions.',
+            'Creator Journey': 'Track published work and the time you invest in creating it.',
+            Insights: 'Review logged sessions and recent creative effort.',
             Settings: 'Manage workspace preferences and data.',
           }[view]}</p>
         </div>
@@ -330,17 +345,8 @@ export function Studio() {
           {view==='Topic Bank' && <button className="button primary" onClick={()=>open({kind:'topic'})}><Plus size={16}/> New idea</button>}
           {view==='Calendar' && <><button className="button secondary" onClick={undoSchedule} disabled={busy||!scheduleUndo.length}>Undo scheduling</button>
             <button className="button primary" onClick={()=>open({kind:'block'})}><Plus size={16}/> Schedule work</button></>}
-          {view==='Projects' && selected && <div className="project-tabs actions">
-        {(['board','timeline','checklist'] as const).map(tab=><button key={tab} className="button secondary compact"
-          aria-pressed={projectTab===tab} onClick={()=>setProjectTab(tab)}>{tab==='board'?'Kanban':tab==='timeline'?'Project timeline':'Checklist'}</button>)}
-        <button className="text-button" onClick={()=>{setQuestProject(selected.id);setQuestTask('');setView('Quick Quests');setProjectId(undefined)}}>Quick Quests for this project</button>
-      </div>}
-      {(view==='Timeline' || (view==='Projects' && selected && projectTab==='timeline')) && <ProductionTimeline snapshot={snapshot}
-        project={view==='Projects'?selected:undefined} busy={busy} undo={scheduleUndo.length?undoSchedule:undefined}
-        edit={item=>open({kind:'span',item})} move={saveSpan}
-        complete={task=>updateTask(task,task.status==='done'?'todo':'done')} openTask={openTask} openProject={showProject}/>}
-      {view === 'Projects' && (selected ? <>
-            <button className="button secondary" onClick={() => open({ kind: 'project', project: selected })}>Edit project</button>
+          {view === 'Projects' && (selected ? <>
+            <ProjectOptions project={selected} edit={editProject} archive={archiveProject} remove={removeProject}/>
             <button className="button primary" onClick={() => open({ kind: 'task', project: selected })}><Plus size={17} /> New task</button>
           </> : newButton)}
           {(view === 'Today' || timerStart !== undefined) && timerButton}
@@ -353,60 +359,28 @@ export function Studio() {
       </div>}
       {notice && <div className="banner success" role="status"><CircleCheck size={17} /> {notice}</div>}
       {!loading && !user && <div className="banner guest">
-        <span>{supabase ? 'Sign in to save projects and start earning XP.' : 'Connect Supabase to enable sign-in and save your work.'}</span>
+        <span>{supabase ? 'Sign in to save projects and track your creative work.' : 'Connect Supabase to enable sign-in and save your work.'}</span>
         <button className="text-button" onClick={() => open({ kind: 'auth' })}>{supabase ? 'Sign in' : 'Connection details'}</button>
       </div>}
 
+      {view==='Projects' && selected && <div className="project-tabs actions">
+        {(['board','timeline','checklist'] as const).map(tab=><button key={tab} className="button secondary compact"
+          aria-pressed={projectTab===tab} onClick={()=>setProjectTab(tab)}>{tab==='board'?'Tasks':tab==='timeline'?'Project timeline':'Checklist'}</button>)}
+        <button className="text-button" onClick={()=>{setQuestProject(selected.id);setQuestTask('');setView('Quick Quests');setProjectId(undefined)}}>Quick Quests for this project</button>
+      </div>}
+      {(view==='Timeline' || (view==='Projects' && selected && projectTab==='timeline')) && <ProductionTimeline snapshot={snapshot}
+        project={view==='Projects'?selected:undefined} busy={busy} undo={scheduleUndo.length?undoSchedule:undefined}
+        edit={item=>open({kind:'span',item})} move={saveSpan}
+        complete={task=>updateTask(task,task.status==='done'?'todo':'done')} openTask={openTask} openProject={showProject}/>}
       {view==='Topic Bank' && <TopicBank topics={snapshot.topics} projects={snapshot.projects} edit={topic=>open({kind:'topic',topic})}
         convert={topic=>open({kind:'project',topic})} link={topic=>open({kind:'link',topic})} open={showProject}/>}
       {(view === 'Calendar' || view === 'Today') && <Planner snapshot={snapshot} todayOnly={view === 'Today'} busy={busy}
         reschedule={(block,start,end)=>saveBlock({...blockArgs(block),p_start:start,p_end:end})}
+        editDay={day=>open({kind:'calendar-day',day})}
+        timeDay={(day,start,end)=>saveDay(day,{p_task:day.task_id,p_day:day.day,p_start:start,p_end:end,p_timezone:snapshot.profile.timezone})}
         edit={block => open({ kind: 'block', block })} add={day => open({ kind: 'block', day })}
         openProject={id => { const project = projectById.get(id); if (project) showProject(project) }} />}
-      {view === 'Progression' && <>
-        <section className="hero" aria-labelledby="creator-level">
-          <div className="hero-content">
-            <div className="hero-label"><Sparkles size={17} /> Creator progression</div>
-            <div className="hero-level"><h2 id="creator-level">Level {creator.level}</h2><span>{total.toLocaleString()} total XP</span></div>
-            <ProgressBar value={creator.percent} label="Creator level progress" />
-            <div className="hero-meta"><span>{creator.current.toLocaleString()} / {creator.target.toLocaleString()} XP</span><span>Level {creator.level + 1}</span></div>
-          </div>
-          <div className="hero-art" aria-hidden="true"><div className="orbit orbit-outer" /><div className="orbit orbit-inner" /><div className="hero-glyph"><Sparkles size={69} strokeWidth={1.25} /></div></div>
-        </section>
-        <section className="skills-section" aria-labelledby="skill-heading">
-          <div className="section-heading"><div><h2 id="skill-heading">Creative skills</h2><p>Progress across your production toolkit.</p></div></div>
-          <div className="skill-grid">{skills.map(({ id, name, color, icon: Icon }) => {
-            const xp = snapshot.ledger.filter(entry => entry.skill_id === id).reduce((sum, entry) => sum + entry.xp, 0)
-            const skill = progression(xp, snapshot.profile.skill_factor)
-            return <article className="skill-card" key={id} style={{ '--skill': color } as CSSProperties}>
-              <div className="skill-top"><span className="skill-icon"><Icon size={19} /></span><Badge>Lv. {skill.level}</Badge></div>
-              <h3>{name}</h3><ProgressBar value={skill.percent} label={`${name} level progress`} />
-              <p>{skill.current.toLocaleString()} / {skill.target.toLocaleString()} XP</p>
-            </article>
-          })}</div>
-        </section>
-        <div className="dashboard-grid">
-          {skills.map(skill => {
-            const earned = snapshot.ledger.filter(award => award.skill_id === skill.id).reduce((sum, award) => sum + award.xp, 0)
-            const milestones = snapshot.milestones.filter(item => item.skill_id === skill.id)
-            return <section className="panel" key={skill.id}><div className="panel-heading"><h2>{skill.name} milestones</h2></div>
-              {milestones.map(item => <div className="list-row" key={`${item.branch}-${item.xp}`}>
-                <div className="row-copy"><small>{item.branch}</small><strong>{item.title}</strong><small>{item.xp} XP</small></div>
-                <Badge>{earned >= item.xp ? 'Reached' : `${item.xp - earned} XP to go`}</Badge>
-              </div>)}
-            </section>
-          })}
-        </div>
-      </>}
-      {view==='Progression' && <section className="panel activity-panel">
-        <div className="panel-heading"><h2>Achievements</h2></div>
-        {snapshot.achievements.map(item=>{
-          const value={projects:snapshot.projects.length,tasks:snapshot.tasks.filter(task=>task.status==='done').length,
-            minutes:snapshot.sessions.reduce((sum,session)=>sum+session.minutes,0),xp:total}[item.metric]
-          return <div className="list-row" key={item.id}><div className="row-copy"><strong>{item.title}</strong><small>{item.description}</small></div>
-            <Badge>{value>=item.threshold?'Reached':`${value} / ${item.threshold}`}</Badge></div>
-        })}
-      </section>}
+      {view === 'Creator Journey' && <CreatorJourney snapshot={snapshot}/>}
       {view === 'Today' && <>
         <div className="dashboard-grid">
           <section className="panel">
@@ -423,7 +397,6 @@ export function Studio() {
           {activity.length ? activity.slice(0, 6).map(item => <div className="list-row" key={item.id}>
             <span className="project-icon">{item.kind === 'session' ? <Clock3 size={18} /> : <Check size={18} />}</span>
             <div className="row-copy"><strong>{item.title}</strong><small>{item.subtitle} · {formatDate(item.date, snapshot.profile.timezone)}</small></div>
-            <span className="xp-label">+{snapshot.ledger.find(award => award.source_type === item.kind && award.source_id === item.id)?.xp ?? 0} XP</span>
           </div>) : <Empty icon={Activity} title="No activity yet">Completed tasks and logged work will show up here.</Empty>}
         </section>
       </>}
@@ -442,7 +415,7 @@ export function Studio() {
           const minutes = template.details.minutes
           const skill = skills.find(item => item.id === template.details.skill)
           const completed = snapshot.tasks.some(task => task.project_id === questProject && milestoneTitle(task.title) === milestoneTitle(template.name) && task.skill_id === skill?.id && task.status === 'done')
-          return <article className="quest-card" key={template.id} style={{ '--skill': skill?.color } as CSSProperties}>
+          return <article className="quest-card" key={template.id} style={{ '--skill': workflow[stageKey(undefined,skill?.id)].color } as CSSProperties}>
             <div><small>{skill?.name} · {minutes ? `${minutes} min focus` : 'Completion milestone'}{recommendedSkill && recommendedSkill===skill?.id && ' · Recommended'}</small><h3>{template.name}</h3></div>
             <div className="actions"><button className="button primary compact" disabled={busy || (minutes ? timerStart !== undefined : completed || !questProject)} onClick={() => {
               if (!minutes) {
@@ -464,9 +437,9 @@ export function Studio() {
       </section>}
       {view === 'Projects' && (selected ? <>
         <section className="panel project-details">
-          <div className="panel-heading"><h2>Production pipeline</h2><Badge>{selected.archived ? 'Archived' : selected.status}</Badge></div>
+          <div className="panel-heading"><h2>Production pipeline</h2><Badge>{selected.archived ? 'Archived' : workflow[selected.workflow_stage].name}</Badge></div>
           <div className="pipeline">{snapshot.stages.filter(stage => stage.project_id === selected.id).map(stage =>
-            <Badge key={stage.id} className={stage.id === selected.production_stage_id ? 'pipeline-current' : undefined}>{stage.name}</Badge>)}
+            <span key={stage.id} className="stage-label" style={{ '--stage': workflow[stageKey(stage.name)].color } as CSSProperties}>{stage.name}</span>)}
             {!snapshot.stages.some(stage => stage.project_id === selected.id) && <small>Add a stage from a production preset.</small>}</div>
           {selected.target_publication_date && <p>Target publication · {selected.target_publication_date}</p>}
           {selected.actual_publication_date && <p>Published · {selected.actual_publication_date}</p>}
@@ -492,7 +465,8 @@ export function Studio() {
           <div className="panel-heading"><h2>Production checklist</h2></div>
           {renderTaskTree(null)}
         </section>}
-      </> : <Portfolio snapshot={snapshot} open={showProject}/>)}
+      </> : <Portfolio snapshot={snapshot} open={showProject} busy={busy} move={moveProject}
+        edit={editProject} archive={archiveProject} remove={removeProject}/>)}
 
       {view === 'Insights' && <><Insights snapshot={snapshot} /><section className="panel activity-panel">
         <div className="panel-heading"><h2><Clock3 size={20} /> Session history</h2><Badge>{snapshot.sessions.length}</Badge></div>
@@ -500,7 +474,6 @@ export function Studio() {
           <span className="project-icon"><Clock3 size={18} /></span>
           <div className="row-copy"><strong>{session.minutes} min · {skillName(session.skill_id)}</strong>
             <small>{projectById.get(session.project_id ?? '')?.name} · {formatDate(session.started_at, session.timezone)}</small></div>
-          <span className="xp-label">+{snapshot.ledger.find(award => award.source_type === 'session' && award.source_id === session.id)?.xp ?? 0} XP</span>
           <button className="button secondary compact" onClick={() => open({ kind: 'session', session })}>Edit</button>
         </div>) : <Empty icon={Clock3} title="No sessions logged">Start the timer or log time manually.</Empty>}
       </section></>}
@@ -523,7 +496,7 @@ export function Studio() {
             event.preventDefault()
             if (!user) return
             const values = new FormData(event.currentTarget)
-            void mutate(() => rpc('studio_preferences', { p_timezone: values.get('timezone'), p_theme: values.get('theme'), p_bonus: Number(values.get('bonus')) }), 'Preferences saved.')
+            void mutate(() => rpc('studio_preferences', { p_timezone: values.get('timezone'), p_theme: values.get('theme'), p_bonus: snapshot.profile.default_task_xp }), 'Preferences saved.')
           }}>
             <label>Appearance<select name="theme" defaultValue={user ? snapshot.profile.theme : localTheme} onChange={event => { if (!user) setLocalTheme(event.target.value as Theme) }}>
               <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
@@ -539,18 +512,17 @@ export function Studio() {
                 const input = event.currentTarget.form?.elements.namedItem('timezone')
                 if (input instanceof HTMLInputElement) input.value = Intl.DateTimeFormat().resolvedOptions().timeZone
               }}>Use device time zone</button>
-              <label>Default task completion XP<input name="bonus" type="number" min="0" max="10000" required defaultValue={snapshot.profile.default_task_xp} /></label>
               <button className="button primary" disabled={busy}>Save preferences</button>
             </>}
           </form>
         </section>
         <section className="panel"><div className="panel-heading"><h2>Your data</h2></div>
-          <div className="settings-form"><p>Download your preferences, projects, tasks, work sessions, and XP ledger as JSON.</p>
+          <div className="settings-form"><p>Download your preferences, projects, tasks, work sessions, and publication history as JSON.</p>
             <button className="button secondary" disabled={!user || busy} onClick={async () => {
               setError('')
               const owner = currentOwner.current
               try {
-                const data = await rpc<Snapshot>('studio_production_snapshot')
+                const data = await rpc<Snapshot>('studio_journey_snapshot')
                 if (owner !== currentOwner.current) return
                 const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
                 const link = document.createElement('a')
@@ -572,32 +544,34 @@ export function Studio() {
       busy={busy} error={modalError} close={()=>setModal(undefined)} save={id=>void mutate(()=>rpc('studio_link_topic',{p_id:modal.topic.id,p_project:id}),'Project linked.')}/>}
     {modal?.kind==='span' && <SpanEditor item={modal.item} busy={busy} error={modalError} close={()=>setModal(undefined)}
       save={(start,end)=>saveSpan(modal.item,start,end)}/>}
+    {modal?.kind==='calendar-day' && <CalendarDayEditor entry={modal.day} snapshot={snapshot} busy={busy} error={modalError}
+      close={()=>setModal(undefined)} save={args=>saveDay(modal.day,args)}/>}
     {modal?.kind === 'block' && <BlockEditor snapshot={snapshot} block={modal.block} day={modal.day} projectId={modal.projectId} taskId={modal.taskId} busy={busy} error={modalError}
       close={() => setModal(undefined)} save={saveBlock} duplicate={modal.duplicate} copy={block=>open({kind:'block',block,duplicate:true})} key={modal.duplicate?'duplicate':'block'} />}
     {modal?.kind === 'template' && <TemplateEditor kind={modal.category} template={modal.template} busy={busy} error={modalError}
       close={() => setModal(undefined)} save={args => void mutate(() => rpc('studio_template', args), args.p_delete ? 'Preset deleted.' : 'Preset saved.')} />}
     {modal?.kind === 'project' && <ProjectEditor snapshot={snapshot} project={modal.project} topic={modal.topic} busy={busy} error={modalError} close={() => setModal(undefined)}
-      remove={project => open({ kind: 'delete', project })} save={(args, id) => void mutate(() => rpc(modal.project?'studio_edit_production':'studio_create_production', args), 'Project saved.', () => {
+      remove={project => open({ kind: 'delete', project })} save={(args, id) => void mutate(() => rpc(modal.project?'studio_edit_workflow_project':'studio_create_production', args), 'Project saved.', () => {
         setView('Projects')
         setProjectId(id)
         setProjectTab('board')
       })} />}
-    {modal?.kind === 'task' && <TaskEditor snapshot={snapshot} project={modal.project} task={modal.task} initialStatus={modal.initialStatus} defaultBonus={snapshot.profile.default_task_xp}
+    {modal?.kind === 'task' && <TaskEditor snapshot={snapshot} project={modal.project} task={modal.task} initialStatus={modal.initialStatus}
       busy={busy} error={modalError} close={() => setModal(undefined)}
       action={(task,action)=>action==='delete'?open({kind:'delete',task}):void mutate(()=>rpc('studio_task_action',{
         p_project:task.project_id,p_task:task.id,p_action:action,p_new_id:crypto.randomUUID(),
       }),'Task duplicated.')}
-      save={args => void mutate(() => rpc('studio_edit_board_task', args), args.p_status === 'done' ? 'Task saved. XP updated.' : 'Task saved.')} />}
+      save={args => void mutate(() => rpc('studio_edit_board_task', args), 'Task saved.')} />}
     {modal?.kind === 'session' && <SessionEditor snapshot={snapshot} session={modal.session} draft={modal.session ? undefined : timerDraft}
       busy={busy} error={modalError} close={() => setModal(undefined)} remove={session => open({ kind: 'delete', session })}
-      save={args => void mutate(() => rpc('studio_log_session', args), 'Work session saved. XP updated.', () => {
+      save={args => void mutate(() => rpc('studio_log_session', args), 'Work session saved.', () => {
         if (!modal.session) setTimerDraft(undefined)
       })} />}
     {modal?.kind === 'delete' && <StudioDialog title={modal.project ? 'Delete project?' : modal.task ? 'Delete task?' : modal.topic ? 'Delete idea?' : 'Delete work session?'} description={
-      modal.project ? `“${modal.project.name}” and its tasks and sessions will be permanently deleted. XP will be recalculated.` :
-        modal.task ? 'This removes the task and its completion XP. Work blocks and sessions stay linked to the project.' :
+      modal.project ? `“${modal.project.name}” and its tasks, timeline dates, and calendar entries will be permanently deleted. Logged time and publication history will be kept.` :
+        modal.task ? 'This removes the task and its timeline dates. Manually scheduled blocks and logged sessions stay linked to the project.' :
           modal.topic ? 'This permanently deletes the idea. A linked project stays in Projects.' :
-            'This session will be permanently deleted. XP for that day will be recalculated.'
+            'This session will be permanently deleted from your creative time history.'
     } close={() => { if (!busy) setModal(undefined) }}>
       {modalError && <p className="form-error" role="alert">{modalError}</p>}
       <div className="form-actions">
@@ -606,8 +580,8 @@ export function Studio() {
           const { project, session, task, topic } = modal
           if(task) void mutate(()=>rpc('studio_task_action',{p_project:task.project_id,p_task:task.id,p_action:'delete'}),'Task deleted.')
           if(topic) void mutate(()=>rpc('studio_topic',{p_id:topic.id,p_data:{},p_delete:true}),'Idea deleted.')
-          if (project) void mutate(() => rpc('studio_project', { p_id: project.id, p_name: '', p_description: '', p_archived: false, p_delete: true }), 'Project deleted. XP updated.', () => setProjectId(undefined))
-          if (session) void mutate(() => rpc('studio_session', { p_id: session.id, p_project: null, p_task: null, p_skill: null, p_started: null, p_minutes: null, p_delete: true }), 'Session deleted. XP updated.')
+          if (project) void mutate(() => rpc('studio_delete_project_keep_history', { p_id: project.id }), 'Project deleted.', () => setProjectId(undefined))
+          if (session) void mutate(() => rpc('studio_session', { p_id: session.id, p_project: null, p_task: null, p_skill: null, p_started: null, p_minutes: null, p_delete: true }), 'Session deleted.')
         }}>Delete {modal.project ? 'project' : modal.task ? 'task' : modal.topic ? 'idea' : 'session'}</button>
       </div>
     </StudioDialog>}

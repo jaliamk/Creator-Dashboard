@@ -3,7 +3,7 @@ import { Temporal } from '@js-temporal/polyfill'
 import { Check, ChevronRight, RotateCcw } from 'lucide-react'
 import { StudioDialog } from '@/components/ui/dialog'
 import { currentDay } from '@/components/planner'
-import { skills, type Project, type Snapshot, type Span, type Task } from '@/lib/studio'
+import { stageKey, workflow, type Project, type Snapshot, type Span, type Task } from '@/lib/studio'
 
 export type SpanItem = Span & { id: string; project_id: string; title: string; kind: 'stage' | 'task' }
 type Row = SpanItem & { progress: number; color?: string; task?: Task; depth: number; collapsible?: boolean }
@@ -42,12 +42,12 @@ export function ProductionTimeline({ snapshot, project, busy, undo, edit, move, 
     const tasks = assigned.filter(task => task.project_id===video.id)
     const taskRow = (task: Task): Row => ({
       ...task, kind:'task', task, depth:task.stage_id ? 1 : 0, progress:Number(task.status==='done'),
-      color:skills.find(item => item.id===task.skill_id)?.color,
+      color:workflow[stageKey(stages.find(item=>item.id===task.stage_id)?.name,task.skill_id)].color,
     })
     const phases = stages.filter(stage => stage.project_id===video.id).flatMap(stage => {
       const children=tasks.filter(task=>task.stage_id===stage.id)
       const row:Row = { ...stage, title:stage.name, kind:'stage', depth:0, collapsible:Boolean(project && children.length),
-        progress:children.length?children.filter(task=>task.status==='done').length/children.length:0 }
+        progress:children.length?children.filter(task=>task.status==='done').length/children.length:0, color:workflow[stageKey(stage.name)].color }
       return [row,...(project && !closed.includes(stage.id) ? children.map(taskRow) : [])]
     })
     return [...phases,...(project ? tasks.filter(task=>!task.stage_id).map(taskRow) : [])]

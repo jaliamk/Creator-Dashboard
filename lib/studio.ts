@@ -14,8 +14,37 @@ export const skills = [
   { id: 'production', name: 'Production', color: '#7184C4', icon: Layers3 },
 ] as const
 
+export const workflow = {
+  ideation: { name: 'Ideation', color: '#A68BB5' },
+  scriptwriting: { name: 'Scriptwriting', color: '#6489B5' },
+  filming: { name: 'Filming', color: '#648B80' },
+  editing: { name: 'Editing', color: '#BD8A55' },
+  preparing: { name: 'Preparing to Publish', color: '#BF7886' },
+  published: { name: 'Published', color: '#749B68' },
+} as const
+export type WorkflowStage = keyof typeof workflow
+export const workflowKeys = Object.keys(workflow) as WorkflowStage[]
+
+export function stageKey(name: string | undefined, skill?: string): WorkflowStage {
+  if (name) {
+    if (/publish|thumbnail|metadata|upload/i.test(name)) return 'preparing'
+    if (/edit|post-production/i.test(name)) return 'editing'
+    if (/film|rehears|test run|record/i.test(name)) return 'filming'
+    if (/script|writ/i.test(name)) return 'scriptwriting'
+    if (/ideation|research|selection/i.test(name)) return 'ideation'
+  }
+  if (skill === 'editing' || skill === 'filming' || skill === 'scriptwriting') return skill
+  return skill === 'production' ? 'preparing' : skill === 'presentation' ? 'filming' : 'ideation'
+}
+
+export type CalendarDay = {
+  project_id: string; task_id: string; day: string;
+  starts_at: string | null; ends_at: string | null; timezone: string | null;
+}
+export type Publication = { source_project_id: string; title: string; format: 'long' | 'short'; published_on: string }
+
 export type Project = { id: string; name: string; description: string; archived: boolean
-  content_type: string; production_stage_id: string | null; priority: number; status: string
+  content_type: string; production_stage_id: string | null; priority: number; status: string; workflow_stage: WorkflowStage
   target_publication_date: string | null; actual_publication_date: string | null; notes: string; script: string
   created_at: string; updated_at: string; start_date: string | null; cover_url: string
 }
@@ -34,7 +63,7 @@ export type Achievement = { id: string; title: string; description: string; metr
 export type PlanPhase = { name: string; duration: number; start: string | null; end: string | null; tasks: (TaskPreset & { start: string | null; end: string | null })[] }
 export type SessionDraft = { started: string; minutes: number; ended?: string; skill?: string; project?: string; task?: string; method?: 'timer' | 'manual' }
 export type Task = Span & {
-  id: string; project_id: string; title: string; skill_id: string; status: 'todo' | 'doing' | 'blocked' | 'done';
+  id: string; project_id: string; title: string; skill_id: string; status: 'todo' | 'doing' | 'done';
   depends_on: string | null; parent_id: string | null; stage_id: string | null; description: string; position: number;
   estimated_minutes: number | null; due_date: string | null; created_at: string; updated_at: string;
   priority: number; bonus: number; completion_id: string | null; completed_at: string | null
@@ -46,11 +75,11 @@ export type WorkSession = {
 export type Award = { source_type: 'session' | 'completion'; source_id: string; skill_id: string; xp: number; earned_at: string }
 export type Theme = 'system' | 'light' | 'dark'
 export type Profile = { timezone: string; theme: Theme; creator_factor: number; skill_factor: number; daily_cap: number; default_task_xp: number; working_days: number[] }
-export type Snapshot = { profile: Profile; projects: Project[]; stages: Stage[]; blocks: Block[]; templates: Template[]; milestones: Milestone[]; tasks: Task[]; sessions: WorkSession[]; ledger: Award[]; topics: Topic[]; achievements: Achievement[] }
+export type Snapshot = { profile: Profile; projects: Project[]; stages: Stage[]; blocks: Block[]; templates: Template[]; milestones: Milestone[]; tasks: Task[]; sessions: WorkSession[]; ledger: Award[]; topics: Topic[]; achievements: Achievement[]; calendar_days: CalendarDay[]; publications: Publication[] }
 
 export const initial: Snapshot = {
   profile: { timezone: 'UTC', theme: 'system', creator_factor: 50, skill_factor: 100, daily_cap: 100, default_task_xp: 10, working_days: [1, 2, 3, 4, 5] },
-  projects: [], stages: [], tasks: [], sessions: [], ledger: [], blocks: [], templates: [], milestones: [], topics: [], achievements: [],
+  projects: [], stages: [], tasks: [], sessions: [], ledger: [], blocks: [], templates: [], milestones: [], topics: [], achievements: [], calendar_days: [], publications: [],
 }
 
 export async function rpc<T>(name: string, args?: Record<string, unknown>): Promise<T> {
